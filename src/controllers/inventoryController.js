@@ -150,8 +150,26 @@ const createStock = async (req, res) => {
             }
 
         } else {
-            // Logic untuk Accessory Utama
-            // ... (Query insert into accessory_items similar to above)
+            // --- LOGIC UNTUK ACCESSORY UTAMA (Standalone) ---
+
+            // Kita insert ke tabel accessory_items dengan drone_id = NULL
+            const accRes = await client.query(`
+        INSERT INTO accessory_items 
+        (accessory_id, drone_id, serial_number, purchase_price, est_sell_price, status, condition, condition_score, notes)
+        VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id
+      `, [
+                model_id,                 // $1: ID dari katalog accessories (dikirim sbg model_id dari FE)
+                serial_number,            // $2
+                modal_price,              // $3
+                est_sell_price,           // $4
+                status,                   // $5
+                condition,                // $6
+                condition_score || null,  // $7: Jika 'Baru', score biasanya null/undefined
+                notes                     // $8
+            ]);
+
+            itemId = accRes.rows[0].id;
         }
 
         // C. INSERT MARKETPLACE LINKS
