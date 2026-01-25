@@ -127,7 +127,9 @@ const createStock = async (req, res) => {
             marketplace_links, bundle_items
         } = req.body;
 
-        let itemId;
+        let itemId; // ID dari item utama (Drone / Aksesoris Utama)
+        let createdBundleObjects = []; // Array untuk menampung ID & Harga bundle yang baru diinsert
+        let totalPurchaseAmount = parseFloat(modal_price); // Inisialisasi Total dengan Harga Utama
 
         // A. INSERT KE TABEL UTAMA (DRONES / ACCESSORY_ITEMS)
         if (type === 'Drone') {
@@ -141,11 +143,32 @@ const createStock = async (req, res) => {
             if (bundle_items) {
                 const bundles = JSON.parse(bundle_items); // Parse JSON String
                 for (const b of bundles) {
-                    // Asumsi bundle item masuk ke accessory_items dan terhubung ke drone_id
-                    await client.query(`
-            INSERT INTO accessory_items (accessory_id, drone_id, serial_number, purchase_price, est_sell_price, status, condition, condition_score)
-            VALUES ($1, $2, $3, $4, $5, 'Bundle', $6, $7)
-          `, [b.acc_model_id, itemId, b.sn, b.buy, b.sell, b.cond, b.score || null]);
+                    // Pastikan 'buy' (modal) ada nilainya
+                    const bundleBuyPrice = parseFloat(b.buy || 0);
+
+                    const bundleRes = await client.query(`INSERT INTO accessory_items 
+                    (drone_id, accessory_id, serial_number, purchase_price, est_sell_price, status, condition, condition_score, notes)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    RETURNING id
+                  `, [
+                        itemId,           // drone_id (Parent)
+                        b.acc_model_id,   // accessory_id (dari object acc_model)
+                        b.sn,
+                        bundleBuyPrice,
+                        b.sell,
+                        b.status || status,
+                        b.cond || condition,
+                        b.score || null,
+                        b.note
+                    ]);
+                    // Simpan ID dan Harga bundle untuk keperluan Transaksi nanti
+                    createdBundleObjects.push({
+                        id: bundleRes.rows[0].id,
+                        price: bundleBuyPrice
+                    });
+
+                    // Tambahkan ke Total Transaksi
+                    totalPurchaseAmount += bundleBuyPrice;
                 }
             }
 
@@ -178,6 +201,7 @@ const createStock = async (req, res) => {
             for (const link of links) {
                 if (link.url && link.platform) {
                     await client.query(`
+
             INSERT INTO marketplace_links (item_type, item_id, platform, url)
             VALUES ($1, $2, $3, $4)
           `, [type, itemId, link.platform, link.url]);
@@ -201,8 +225,38 @@ const createStock = async (req, res) => {
             }
         }
 
+        // --- C. LOGIC BARU: INSERT PURCHASE TRANSACTION ---
+
+        // 1. Insert Header Transaksi
+        const trxHeaderRes = await client.query(`
+      INSERT INTO transactions (type, date, total_price, notes)
+      VALUES ('PURCHASE', NOW(), $1, $2)
+      RETURNING id
+    `, [
+            totalPurchaseAmount,
+            `Pembelian Stok Baru: ${name} (${serial_number})`
+        ]);
+
+        const transactionId = trxHeaderRes.rows[0].id;
+
+        // 2. Insert Transaction Item (Untuk ITEM UTAMA / Body)
+        await client.query(`
+      INSERT INTO transaction_items (transaction_id, item_type, item_id, price, quantity)
+      VALUES ($1, $2, $3, $4, 1)
+    `, [transactionId, type, itemId, parseFloat(modal_price)]);
+
+        // 3. Insert Transaction Items (Untuk BUNDLE ITEMS - Jika Drone)
+        if (createdBundleObjects.length > 0) {
+            for (const bundleObj of createdBundleObjects) {
+                await client.query(`
+          INSERT INTO transaction_items (transaction_id, item_type, item_id, price, quantity)
+          VALUES ($1, 'Accessory', $2, $3, 1)
+        `, [transactionId, bundleObj.id, bundleObj.price]);
+            }
+        }
+
         await client.query('COMMIT');
-        res.status(201).json({ message: 'Stok berhasil disimpan', id: itemId });
+        res.status(201).json({ message: 'Stok dan Transaksi Pembelian berhasil disimpan', id: itemId });
 
     } catch (err) {
         await client.query('ROLLBACK');
