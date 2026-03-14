@@ -18,6 +18,7 @@ const getStockItems = async (req, res) => {
         d.est_sell_price::float as est_sell_price,
         d.notes,
         d.created_at,
+        d.purchase_date,
         
         -- Subquery: Images
         COALESCE((
@@ -44,7 +45,8 @@ const getStockItems = async (req, res) => {
             'status', ai.status,
             'note', ai.notes,
             'purchase_price', ai.purchase_price::float,  
-            'est_sell_price', ai.est_sell_price::float  
+            'est_sell_price', ai.est_sell_price::float,
+            'purchase_date', ai.purchase_date
           ))
           FROM accessory_items ai
           JOIN accessories acc ON ai.accessory_id = acc.id
@@ -68,6 +70,7 @@ const getStockItems = async (req, res) => {
         ai.est_sell_price::float as est_sell_price,
         ai.notes,
         ai.created_at,
+        ai.purchase_date,
 
         -- Subquery: Images
         COALESCE((
@@ -88,7 +91,7 @@ const getStockItems = async (req, res) => {
 
       FROM accessory_items ai
       JOIN accessories acc ON ai.accessory_id = acc.id
-      WHERE ai.drone_id IS NULL AND ai.status != 'Sold' -- Hanya ambil aksesoris lepasan (bukan bundle)
+      WHERE ai.drone_id IS NULL -- Hanya ambil aksesoris lepasan (bukan bundle)
 
       ORDER BY created_at DESC;
     `;
@@ -135,9 +138,9 @@ const createStock = async (req, res) => {
         // A. INSERT KE TABEL UTAMA (DRONES / ACCESSORY_ITEMS)
         if (type === 'Drone') {
             const droneRes = await client.query(`
-        INSERT INTO drones (model_id, serial_number, purchase_price, est_sell_price, status, condition, condition_score, notes)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id
-      `, [model_id, serial_number, purchase_price, est_sell_price, status, condition, condition_score || null, notes]);
+        INSERT INTO drones (model_id, serial_number, purchase_price, est_sell_price, status, condition, condition_score, notes, purchase_date)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id
+      `, [model_id, serial_number, purchase_price, est_sell_price, status, condition, condition_score || null, notes, trxDate]);
             itemId = droneRes.rows[0].id;
 
             // B. INSERT BUNDLE ITEMS (Jika Ada)
@@ -148,8 +151,8 @@ const createStock = async (req, res) => {
                     const bundleBuyPrice = parseFloat(b.purchase_price || 0);
 
                     const bundleRes = await client.query(`INSERT INTO accessory_items 
-                    (drone_id, accessory_id, serial_number, purchase_price, est_sell_price, status, condition, condition_score, notes)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    (drone_id, accessory_id, serial_number, purchase_price, est_sell_price, status, condition, condition_score, notes, purchase_date)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                     RETURNING id
                   `, [
                         itemId,           // drone_id (Parent)
@@ -160,7 +163,8 @@ const createStock = async (req, res) => {
                         b.status || status,
                         b.condition || condition,
                         b.score || null,
-                        b.note
+                        b.note,
+                        trxDate
                     ]);
                     // Simpan ID dan Harga bundle untuk keperluan Transaksi nanti
                     createdBundleObjects.push({
@@ -179,8 +183,8 @@ const createStock = async (req, res) => {
             // Kita insert ke tabel accessory_items dengan drone_id = NULL
             const accRes = await client.query(`
         INSERT INTO accessory_items 
-        (accessory_id, drone_id, serial_number, purchase_price, est_sell_price, status, condition, condition_score, notes)
-        VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8)
+        (accessory_id, drone_id, serial_number, purchase_price, est_sell_price, status, condition, condition_score, notes, purchase_date)
+        VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8, $9)
         RETURNING id
       `, [
                 model_id,                 // $1: ID dari katalog accessories (dikirim sbg model_id dari FE)
@@ -190,7 +194,8 @@ const createStock = async (req, res) => {
                 status,                   // $5
                 condition,                // $6
                 condition_score || null,  // $7: Jika 'Baru', score biasanya null/undefined
-                notes                     // $8
+                notes,                    // $8
+                trxDate
             ]);
 
             itemId = accRes.rows[0].id;
@@ -305,9 +310,11 @@ const updateStock = async (req, res) => {
         notes,
         est_sell_price,
         purchase_price,
+        purchase_date,
         bundle_items // Array of objects dari frontend
     } = req.body;
 
+    const trxDate = purchase_date ? purchase_date : new Date();
     const client = await db.pool.connect();
 
     try {
@@ -366,8 +373,8 @@ const updateStock = async (req, res) => {
                     } else {
                         console.log('abcdefghid')
                         await client.query(`
-              INSERT INTO accessory_items (serial_number, status, condition , condition_score, notes, est_sell_price, purchase_price, drone_id, accessory_id)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [
+              INSERT INTO accessory_items (serial_number, status, condition , condition_score, notes, est_sell_price, purchase_price, drone_id, accessory_id, purchase_date)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`, [
                             item.serial_number,
                             item.status || status,
                             item.condition || condition,
@@ -376,7 +383,8 @@ const updateStock = async (req, res) => {
                             item.est_sell_price, // Update harga pasarannya
                             item.purchase_price,
                             id,
-                            item.acc_model_id
+                            item.acc_model_id,
+                            trxDate,
                         ])
                             .then(res => {
                                 console.log(res.rows); // Log the results here
