@@ -17,32 +17,29 @@ const getDashboardData = async (req, res) => {
             // 1. Sales Overview (Bulan Ini)
             db.query(`
         SELECT 
-          SUM(t.total_price) as total_sales,
-          SUM(ti.price - COALESCE(d.purchase_price, ai.purchase_price, 0)) as total_profit
+          SUM(t.total_amount) as total_sales,
+          SUM(t.total_amount) - SUM(t.total_cogs) as total_profit
         FROM transactions t
-        JOIN transaction_items ti ON t.id = ti.transaction_id
-        LEFT JOIN drones d ON ti.item_id = d.id AND ti.item_type = 'drone'
-        LEFT JOIN accessory_items ai ON ti.item_id = ai.id AND ti.item_type = 'accessory'
-        WHERE t.type = 'sale' 
+        WHERE t.type = 'SALE' 
         AND date_trunc('month', t.date) = date_trunc('month', CURRENT_DATE)
       `),
 
             // 2. Stock Card: Ready Stock
             db.query(`
         SELECT COUNT(id) as total_count, COALESCE(SUM(purchase_price), 0) as total_value
-        FROM drones WHERE status = 'ready'
+        FROM drones WHERE status = 'Ready'
       `),
 
             // 3. Stock Card: Repair Stock
             db.query(`
         SELECT COUNT(id) as total_count, COALESCE(SUM(purchase_price), 0) as total_value
-        FROM drones WHERE status = 'repair'
+        FROM drones WHERE status = 'Repair'
       `),
 
             // 4. Stock Card: Accessory Value
             db.query(`
         SELECT COUNT(id) as total_count, COALESCE(SUM(purchase_price), 0) as total_value
-        FROM accessory_items WHERE status = 'ready'
+        FROM accessory_items WHERE status = 'Ready'
       `),
 
             // 5. Analytics: Top Selling Models (Top 4)
@@ -52,7 +49,7 @@ const getDashboardData = async (req, res) => {
         JOIN drones d ON ti.item_id = d.id
         JOIN drone_models dm ON d.model_id = dm.id
         JOIN transactions t ON ti.transaction_id = t.id
-        WHERE ti.item_type = 'drone' AND t.type = 'sale'
+        WHERE ti.item_type = 'drone' AND t.type = 'SALE'
         GROUP BY dm.model_name
         ORDER BY units_sold DESC
         LIMIT 4
@@ -63,7 +60,7 @@ const getDashboardData = async (req, res) => {
         SELECT d.id, dm.model_name, EXTRACT(DAY FROM AGE(CURRENT_DATE, d.updated_at)) as days
         FROM drones d
         JOIN drone_models dm ON d.model_id = dm.id
-        WHERE d.status = 'ready'
+        WHERE d.status = 'Ready'
         ORDER BY d.updated_at ASC
         LIMIT 1
       `),
@@ -73,7 +70,7 @@ const getDashboardData = async (req, res) => {
         SELECT d.id, dm.model_name, EXTRACT(DAY FROM AGE(CURRENT_DATE, d.updated_at)) as days
         FROM drones d
         JOIN drone_models dm ON d.model_id = dm.id
-        WHERE d.status = 'repair'
+        WHERE d.status = 'Repair'
         ORDER BY d.updated_at ASC
         LIMIT 1
       `),

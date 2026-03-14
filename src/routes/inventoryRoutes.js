@@ -22,7 +22,10 @@ const upload = multer({ storage: storage });
 router.post('/stocks', upload.array('images'), inventoryController.createStock);
 
 router.get('/stocks', inventoryController.getStockItems);
-router.put('/stocks/:id', inventoryController.updateStock); // Update
+router.put('/stocks/:id', upload.array('images'), inventoryController.updateStock); // Update
 router.delete('/stocks/:id', inventoryController.deleteStock); // Delete
+router.post('/stocks/:itemType/:itemId/adjustment', inventoryController.addStockAdjustment);
+router.get('/stocks/:itemType/:id', inventoryController.getStockDetail);
+router.get('/stocks/available-accessories', inventoryController.getAvailableAccessories);
 
 module.exports = router;

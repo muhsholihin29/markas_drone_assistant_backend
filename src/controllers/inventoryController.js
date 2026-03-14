@@ -14,7 +14,7 @@ const getStockItems = async (req, res) => {
         d.condition,
         d.condition_score,
         'Drone' as type,
-        d.purchase_price::float as modal_price,
+        d.purchase_price::float,
         d.est_sell_price::float as est_sell_price,
         d.notes,
         d.created_at,
@@ -36,14 +36,15 @@ const getStockItems = async (req, res) => {
         -- Subquery: Bundle Items (Khusus Drone)
         COALESCE((
           SELECT json_agg(json_build_object(
+            'id', ai.id,
             'name', acc.name,
-            'sn', ai.serial_number,
-            'cond', ai.condition,
+            'serial_number', ai.serial_number,
+            'condition', ai.condition,
             'score', ai.condition_score,
             'status', ai.status,
             'note', ai.notes,
-            'buy', ai.purchase_price::float,  
-            'sell', ai.est_sell_price::float  
+            'purchase_price', ai.purchase_price::float,  
+            'est_sell_price', ai.est_sell_price::float  
           ))
           FROM accessory_items ai
           JOIN accessories acc ON ai.accessory_id = acc.id
@@ -52,7 +53,6 @@ const getStockItems = async (req, res) => {
 
       FROM drones d
       JOIN drone_models dm ON d.model_id = dm.id
-      WHERE d.status != 'Sold' -- Opsi: Sembunyikan yang sudah terjual dari list utama
 
       UNION ALL
 
@@ -64,7 +64,7 @@ const getStockItems = async (req, res) => {
         ai.condition,
         ai.condition_score,
         'Accessory' as type,
-        ai.purchase_price::float as modal_price,
+        ai.purchase_price::float,
         ai.est_sell_price::float as est_sell_price,
         ai.notes,
         ai.created_at,
@@ -123,20 +123,21 @@ const createStock = async (req, res) => {
         // req.body berisi field text, req.files berisi gambar
         const {
             type, model_id, name, serial_number, condition, condition_score,
-            status, modal_price, est_sell_price, notes,
-            marketplace_links, bundle_items
+            status, purchase_price, est_sell_price, notes,
+            marketplace_links, bundle_items, purchase_date
         } = req.body;
 
         let itemId; // ID dari item utama (Drone / Aksesoris Utama)
         let createdBundleObjects = []; // Array untuk menampung ID & Harga bundle yang baru diinsert
-        let totalPurchaseAmount = parseFloat(modal_price); // Inisialisasi Total dengan Harga Utama
+        let totalPurchaseAmount = parseFloat(purchase_price); // Inisialisasi Total dengan Harga Utama
+        const trxDate = purchase_date ? purchase_date : new Date();
 
         // A. INSERT KE TABEL UTAMA (DRONES / ACCESSORY_ITEMS)
         if (type === 'Drone') {
             const droneRes = await client.query(`
         INSERT INTO drones (model_id, serial_number, purchase_price, est_sell_price, status, condition, condition_score, notes)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id
-      `, [model_id, serial_number, modal_price, est_sell_price, status, condition, condition_score || null, notes]);
+      `, [model_id, serial_number, purchase_price, est_sell_price, status, condition, condition_score || null, notes]);
             itemId = droneRes.rows[0].id;
 
             // B. INSERT BUNDLE ITEMS (Jika Ada)
@@ -144,7 +145,7 @@ const createStock = async (req, res) => {
                 const bundles = JSON.parse(bundle_items); // Parse JSON String
                 for (const b of bundles) {
                     // Pastikan 'buy' (modal) ada nilainya
-                    const bundleBuyPrice = parseFloat(b.buy || 0);
+                    const bundleBuyPrice = parseFloat(b.purchase_price || 0);
 
                     const bundleRes = await client.query(`INSERT INTO accessory_items 
                     (drone_id, accessory_id, serial_number, purchase_price, est_sell_price, status, condition, condition_score, notes)
@@ -153,11 +154,11 @@ const createStock = async (req, res) => {
                   `, [
                         itemId,           // drone_id (Parent)
                         b.acc_model_id,   // accessory_id (dari object acc_model)
-                        b.sn,
+                        b.serial_number,
                         bundleBuyPrice,
-                        b.sell,
+                        b.est_sell_price,
                         b.status || status,
-                        b.cond || condition,
+                        b.condition || condition,
                         b.score || null,
                         b.note
                     ]);
@@ -184,7 +185,7 @@ const createStock = async (req, res) => {
       `, [
                 model_id,                 // $1: ID dari katalog accessories (dikirim sbg model_id dari FE)
                 serial_number,            // $2
-                modal_price,              // $3
+                purchase_price,              // $3
                 est_sell_price,           // $4
                 status,                   // $5
                 condition,                // $6
@@ -229,8 +230,8 @@ const createStock = async (req, res) => {
 
         // 1. Insert Header Transaksi
         const trxHeaderRes = await client.query(`
-      INSERT INTO transactions (type, date, total_price, notes)
-      VALUES ('PURCHASE', NOW(), $1, $2)
+      INSERT INTO transactions (type, date, total_amount, notes)
+      VALUES ('PURCHASE', trxDate, $1, $2)
       RETURNING id
     `, [
             totalPurchaseAmount,
@@ -243,7 +244,7 @@ const createStock = async (req, res) => {
         await client.query(`
       INSERT INTO transaction_items (transaction_id, item_type, item_id, price, quantity)
       VALUES ($1, $2, $3, $4, 1)
-    `, [transactionId, type, itemId, parseFloat(modal_price)]);
+    `, [transactionId, type, itemId, parseFloat(purchase_price)]);
 
         // 3. Insert Transaction Items (Untuk BUNDLE ITEMS - Jika Drone)
         if (createdBundleObjects.length > 0) {
@@ -285,10 +286,349 @@ const deleteStock = async (req, res) => {
 
 // --- 3. UPDATE STOCK (PUT) ---
 const updateStock = async (req, res) => {
-    // Logic mirip Create, tapi gunakan UPDATE ... WHERE id = ...
-    // Untuk simplifikasi, implementasikan update field utama dulu
-    res.json({ message: "Fitur Update (Logic Pending)" });
+    // Multer SUDAH bekerja di sini
+    console.log("--------------------------------------------------");
+    console.log("DEBUG: ISI REQ.BODY (Text Fields):");
+    console.log(req.body);
+
+    console.log("DEBUG: ISI REQ.FILES (Gambar):");
+    console.log(req.files);
+    console.log("--------------------------------------------------");
+    const { id } = req.params;
+    const {
+        type,
+        model_id,
+        serial_number,
+        status,
+        condition,
+        condition_score,
+        notes,
+        est_sell_price,
+        purchase_price,
+        bundle_items // Array of objects dari frontend
+    } = req.body;
+
+    const client = await db.pool.connect();
+
+    try {
+        await client.query('BEGIN');
+
+        // 1. UPDATE DATA UTAMA (BODY)
+        if (type === 'Drone') {
+            await client.query(`
+        UPDATE drones 
+        SET model_id = $1, serial_number = $2, status = $3, condition = $4, condition_score = $5, notes = $6, est_sell_price = $7, purchase_price = $8 
+        WHERE id = $9
+      `, [model_id, serial_number, status, condition, condition_score, notes, est_sell_price, purchase_price, id]);
+
+            // --- LOGIC BUNDLE ITEMS (HANYA UNTUK DRONE) ---
+            const bundles = JSON.parse(bundle_items); // Parse JSON String
+            if (bundles && Array.isArray(bundles)) {
+
+                // A. Ambil ID Aksesoris yang saat ini terpasang di Drone ini dari DB
+                const currentBundlesRes = await client.query(`SELECT id FROM accessory_items WHERE drone_id = $1`, [id]);
+                const currentBundleIds = currentBundlesRes.rows.map(r => r.id);
+
+                // B. Ambil ID Aksesoris yang dikirim dari Frontend (UI)
+                const incomingBundleIds = bundles.filter(b => b.id != null).map(b => parseInt(b.id));
+
+                // C. Cari Item yang di-HAPUS dari UI (Ada di DB, tapi tidak ada di kiriman UI)
+                // Item ini kita DETACH (lepas jadi stok eceran)
+                const detachedIds = currentBundleIds.filter(dbId => !incomingBundleIds.includes(dbId));
+
+                if (detachedIds.length > 0) {
+                    // Jadikan drone_id = NULL agar masuk ke etalase aksesoris mandiri
+                    await client.query(`
+            DELETE FROM accessory_items WHERE id = ANY($1::int[])
+          `, [detachedIds]);
+                }
+
+                console.log('1aaaaaaaaaaaaaaa')
+                // D. Loop kiriman dari UI untuk UPDATE data aksesoris yang tersisa
+                for (const item of bundles) {
+                    if (item.id) {
+                        console.log('aaaaaaaaaaaaaaa')
+                        // Update estimasi jual, status, dll (TIDAK update purchase_price)
+                        await client.query(`
+              UPDATE accessory_items 
+              SET serial_number = $1, status = $2, condition = $3, condition_score = $4, notes = $5, est_sell_price = $6, drone_id = $8
+              WHERE id = $7
+            `, [
+                            item.serial_number,
+                            item.status || status,
+                            item.condition || condition,
+                            item.condition_score,
+                            item.notes,
+                            item.est_sell_price, // Update harga pasarannya
+                            item.id,
+                            item.is_detached ? null : id
+                        ]);
+                    } else {
+                        console.log('abcdefghid')
+                        await client.query(`
+              INSERT INTO accessory_items (serial_number, status, condition , condition_score, notes, est_sell_price, purchase_price, drone_id, accessory_id)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [
+                            item.serial_number,
+                            item.status || status,
+                            item.condition || condition,
+                            item.score,
+                            item.notes,
+                            item.est_sell_price, // Update harga pasarannya
+                            item.purchase_price,
+                            id,
+                            item.acc_model_id
+                        ])
+                            .then(res => {
+                                console.log(res.rows); // Log the results here
+                            })
+                            .catch(e => console.error(e.stack));
+                    }
+                }
+            }
+
+        } else if (type === 'Accessory') {
+            // Aksesoris eceran tidak punya bundle
+            await client.query(`
+        UPDATE accessory_items 
+        SET accessory_id = $1, serial_number = $2, status = $3, condition = $4, condition_score = $5, notes = $6, est_sell_price = $7
+        WHERE id = $8
+      `, [model_id, serial_number, status, condition, condition_score, notes, est_sell_price, id]);
+        }
+
+        await client.query('COMMIT');
+        res.status(200).json({ message: 'Data stok dan bundle berhasil diperbarui' });
+
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error("Update Stock Error:", err);
+        res.status(500).json({ error: err.message });
+    } finally {
+        client.release();
+    }
 };
 
-module.exports = { createStock, deleteStock, updateStock, getStockItems };
+// src/controllers/inventoryController.js
+
+const addStockAdjustment = async (req, res) => {
+    // itemType: 'drones' atau 'accessory_items'
+    // itemId: ID dari item tersebut
+    const { itemType, itemId } = req.params;
+
+    // type: 'REPAIR' atau 'REFUND'
+    // amount: Nominal uang
+    // notes: Catatan
+    const { type, amount, notes } = req.body;
+
+    const client = await db.pool.connect();
+
+    try {
+        await client.query('BEGIN');
+
+        // 1. Validasi Input
+        if (!['REPAIR', 'REFUND'].includes(type)) {
+            throw new Error("Invalid transaction type. Use REPAIR or REFUND.");
+        }
+        const cleanAmount = parseFloat(amount);
+
+        // 2. Insert Header Transaksi (Keuangan)
+        const trxRes = await client.query(`
+      INSERT INTO transactions (type, date, total_amount, notes)
+      VALUES ($1, NOW(), $2, $3)
+      RETURNING id
+    `, [type, cleanAmount, notes]);
+
+        const trxId = trxRes.rows[0].id;
+
+        // 3. Insert Transaction Item (Link History ke Barang)
+        // Map table name ke 'Item Type' string untuk tabel transaction_items
+        const itemTypeString = itemType === 'drones' ? 'Drone' : 'Accessory';
+
+        await client.query(`
+      INSERT INTO transaction_items (transaction_id, item_type, item_id, price, quantity)
+      VALUES ($1, $2, $3, $4, 1)
+    `, [trxId, itemTypeString, itemId, cleanAmount]);
+
+        // 4. UPDATE HARGA MODAL (Re-Evaluasi Aset)
+        // REPAIR = Nambah Modal (+), REFUND = Kurang Modal (-)
+        const operator = type === 'REPAIR' ? '+' : '-';
+
+        // Pastikan nama tabel valid untuk mencegah SQL Injection
+        const validTables = ['drones', 'accessory_items'];
+        if (!validTables.includes(itemType)) {
+            throw new Error("Invalid table name");
+        }
+
+        await client.query(`
+      UPDATE ${itemType}
+      SET purchase_price = purchase_price ${operator} $1
+      WHERE id = $2
+    `, [cleanAmount, itemId]);
+
+        await client.query('COMMIT');
+
+        res.status(200).json({
+            message: 'Adjustment berhasil disimpan',
+            new_transaction_id: trxId
+        });
+
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error("Adjustment Error:", err);
+        res.status(500).json({ error: err.message });
+    } finally {
+        client.release();
+    }
+};
+
+const getStockDetail = async (req, res) => {
+    const { itemType, id } = req.params; // itemType: 'drones' atau 'accessory_items'
+    const client = await db.pool.connect();
+
+    try {
+        // 1. Tentukan Nama Item Type untuk Query Transaction (Singular/Capitalized)
+        // 'drones' -> 'Drone', 'accessory_items' -> 'Accessory'
+        const trxItemType = itemType === 'drones' ? 'Drone' : 'Accessory';
+
+        // 2. Query Utama (Data Stok + History Keuangan)
+        // Kita gunakan LEFT JOIN atau Subquery untuk mengambil total repair/refund
+        let queryText = '';
+
+        if (itemType === 'drones') {
+            queryText = `
+        SELECT 
+          d.*,
+          m.model_name as name,
+          -- Hitung Total Repair (+)
+          COALESCE((
+            SELECT SUM(price) FROM transaction_items ti 
+            JOIN transactions t ON ti.transaction_id = t.id 
+            WHERE ti.item_type = 'Drone' AND ti.item_id = d.id AND t.type = 'REPAIR'
+          ), 0) as total_repairs,
+          -- Hitung Total Refund (-)
+          COALESCE((
+            SELECT SUM(price) FROM transaction_items ti 
+            JOIN transactions t ON ti.transaction_id = t.id 
+            WHERE ti.item_type = 'Drone' AND ti.item_id = d.id AND t.type = 'REFUND'
+          ), 0) as total_refunds
+        FROM drones d
+        LEFT JOIN drone_models m ON d.model_id = m.id
+        WHERE d.id = $1
+      `;
+        } else {
+            // Logic untuk Accessory Items
+            queryText = `
+        SELECT 
+          a.*,
+          am.name,
+          COALESCE((
+            SELECT SUM(price) FROM transaction_items ti 
+            JOIN transactions t ON ti.transaction_id = t.id 
+            WHERE ti.item_type = 'Accessory' AND ti.item_id = a.id AND t.type = 'REPAIR'
+          ), 0) as total_repairs,
+          COALESCE((
+            SELECT SUM(price) FROM transaction_items ti 
+            JOIN transactions t ON ti.transaction_id = t.id 
+            WHERE ti.item_type = 'Accessory' AND ti.item_id = a.id AND t.type = 'REFUND'
+          ), 0) as total_refunds
+        FROM accessory_items a
+        LEFT JOIN accessories am ON a.accessory_id = am.id
+        WHERE a.id = $1
+      `;
+        }
+
+        const itemRes = await client.query(queryText, [id]);
+
+        if (itemRes.rows.length === 0) {
+            return res.status(404).json({ error: 'Item not found' });
+        }
+
+        const itemData = itemRes.rows[0];
+
+        // 3. Jika Drone, Ambil Bundle Items (Aksesoris bawaan)
+        let bundleItems = [];
+        if (itemType === 'drones') {
+            const bundleRes = await client.query(`
+        SELECT 
+          ai.*,
+          COALESCE(ai.notes, '') as notes,
+          am.name
+        FROM accessory_items ai
+        LEFT JOIN accessories am ON ai.accessory_id = am.id
+        WHERE ai.drone_id = $1
+      `, [id]);
+            bundleItems = bundleRes.rows;
+        }
+
+        // 4. Gabungkan Data
+        const fullData = {
+            ...itemData,
+            bundle_items: bundleItems, // Backend kirim snake_case
+            // Pastikan format Marketplace Link & Images di-parse jika tersimpan sebagai JSON String di DB
+            marketplace_links: typeof itemData.marketplace_links === 'string' ? JSON.parse(itemData.marketplace_links) : itemData.marketplace_links,
+            image_urls: typeof itemData.image_urls === 'string' ? JSON.parse(itemData.image_urls) : itemData.image_urls
+        };
+
+        res.json(fullData);
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
+    } finally {
+        client.release();
+    }
+};
+
+// GET Available (Detached) Accessories for Bundling
+const getAvailableAccessories = async (req, res) => {
+    const client = await db.pool.connect();
+
+    try {
+        // Syarat utama: drone_id IS NULL (Barang Eceran/Jomblo)
+        // Syarat kedua: status = 'Ready' (Barang rusak/terjual tidak boleh di-attach)
+        const queryText = `
+      SELECT 
+        a.*,
+        am.name,
+        
+        -- Hitung history keuangan agar modal yang ditarik tetap akurat
+        COALESCE((
+          SELECT SUM(price) FROM transaction_items ti 
+          JOIN transactions t ON ti.transaction_id = t.id 
+          WHERE ti.item_type = 'Accessory' AND ti.item_id = a.id AND t.type = 'REPAIR'
+        ), 0) as total_repairs,
+        
+        COALESCE((
+          SELECT SUM(price) FROM transaction_items ti 
+          JOIN transactions t ON ti.transaction_id = t.id 
+          WHERE ti.item_type = 'Accessory' AND ti.item_id = a.id AND t.type = 'REFUND'
+        ), 0) as total_refunds
+
+      FROM accessory_items a
+      JOIN accessories am ON a.accessory_id = am.id
+      WHERE a.drone_id IS NULL 
+        AND a.status = 'Ready'
+      ORDER BY a.created_at DESC
+    `;
+
+        const { rows } = await client.query(queryText);
+
+        // Parsing JSON fields jika tersimpan sebagai string (opsional, sesuaikan dengan struktur DB Anda)
+        const formattedRows = rows.map(row => ({
+            ...row,
+            marketplace_links: typeof row.marketplace_links === 'string' ? JSON.parse(row.marketplace_links) : row.marketplace_links,
+            image_urls: typeof row.image_urls === 'string' ? JSON.parse(row.image_urls) : row.image_urls
+        }));
+
+        res.status(200).json(formattedRows);
+
+    } catch (err) {
+        console.error("Get Available Accessories Error:", err);
+        res.status(500).json({ error: err.message });
+    } finally {
+        client.release();
+    }
+};
+
+
+module.exports = { createStock, deleteStock, updateStock, getStockItems, addStockAdjustment, getStockDetail, getAvailableAccessories };
 
