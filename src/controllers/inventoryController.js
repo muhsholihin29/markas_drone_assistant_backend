@@ -6,94 +6,110 @@ const getStockItems = async (req, res) => {
         // Serta JSON_AGG untuk menyusun array (images, bundles, links) langsung dari database.
 
         const query = `
-      SELECT 
-        d.id,
-        dm.model_name as name,
-        d.serial_number,
-        d.status,
-        d.condition,
-        d.condition_score,
-        'Drone' as type,
-        d.purchase_price::float,
-        d.est_sell_price::float as est_sell_price,
-        d.notes,
-        d.created_at,
-        d.purchase_date,
-        
-        -- Subquery: Images
-        COALESCE((
-          SELECT json_agg(image_url)
-          FROM item_images 
-          WHERE item_id = d.id AND item_type = 'Drone'
-        ), '[]') as image_urls,
+            SELECT
+                d.id,
+                dm.model_name as name,
+                d.serial_number,
+                d.status,
+                d.condition,
+                d.condition_score,
+                'Drone' as type,
+                d.purchase_price::float,
+                    d.est_sell_price::float,
+                    d.notes,
+                d.created_at,
+                to_char(d.purchase_date, 'YYYY-MM-DD') as purchase_date,
 
-        -- Subquery: Marketplace Links
-        COALESCE((
-          SELECT json_agg(json_build_object('platform', platform, 'url', url))
-          FROM marketplace_links 
-          WHERE item_id = d.id AND item_type = 'Drone'
-        ), '[]') as marketplace_links,
+                COALESCE(img.image_urls, '[]') as image_urls,
+                COALESCE(mp.marketplace_links, '[]') as marketplace_links,
+                COALESCE(bundle.bundle_items, '[]') as bundle_items
 
-        -- Subquery: Bundle Items (Khusus Drone)
-        COALESCE((
-          SELECT json_agg(json_build_object(
-            'id', ai.id,
-            'name', acc.name,
-            'serial_number', ai.serial_number,
-            'condition', ai.condition,
-            'score', ai.condition_score,
-            'status', ai.status,
-            'note', ai.notes,
-            'purchase_price', ai.purchase_price::float,  
-            'est_sell_price', ai.est_sell_price::float,
-            'purchase_date', ai.purchase_date
-          ))
-          FROM accessory_items ai
-          JOIN accessories acc ON ai.accessory_id = acc.id
-          WHERE ai.drone_id = d.id
-        ), '[]') as bundle_items
+            FROM drones d
+                     JOIN drone_models dm ON d.model_id = dm.id
 
-      FROM drones d
-      JOIN drone_models dm ON d.model_id = dm.id
+-- Images
+                     LEFT JOIN LATERAL (
+                SELECT json_agg(image_url) as image_urls
+                FROM item_images
+                WHERE item_id = d.id AND item_type = 'Drone'
+                    ) img ON true
 
-      UNION ALL
+-- Marketplace
+                     LEFT JOIN LATERAL (
+                SELECT json_agg(
+                               json_build_object(
+                                       'platform', platform,
+                                       'url', url
+                                   )
+                           ) as marketplace_links
+                FROM marketplace_links
+                WHERE item_id = d.id AND item_type = 'Drone'
+                    ) mp ON true
 
-      SELECT 
-        ai.id,
-        acc.name,
-        ai.serial_number,
-        ai.status,
-        ai.condition,
-        ai.condition_score,
-        'Accessory' as type,
-        ai.purchase_price::float,
-        ai.est_sell_price::float as est_sell_price,
-        ai.notes,
-        ai.created_at,
-        ai.purchase_date,
+-- Bundle accessories
+                     LEFT JOIN LATERAL (
+                SELECT json_agg(
+                               json_build_object(
+                                       'id', ai.id,
+                                       'name', acc.name,
+                                       'serial_number', ai.serial_number,
+                                       'condition', ai.condition,
+                                       'score', ai.condition_score,
+                                       'status', ai.status,
+                                       'note', ai.notes,
+                                       'purchase_price', ai.purchase_price::float,
+                                       'est_sell_price', ai.est_sell_price::float,
+                                       'purchase_date', to_char(ai.purchase_date, 'YYYY-MM-DD')
+                                   )
+                           ) as bundle_items
+                FROM accessory_items ai
+                         JOIN accessories acc ON ai.accessory_id = acc.id
+                WHERE ai.drone_id = d.id
+                    ) bundle ON true
 
-        -- Subquery: Images
-        COALESCE((
-          SELECT json_agg(image_url)
-          FROM item_images 
-          WHERE item_id = ai.id AND item_type = 'Accessory'
-        ), '[]') as image_urls,
+            UNION ALL
 
-        -- Subquery: Marketplace Links
-        COALESCE((
-          SELECT json_agg(json_build_object('platform', platform, 'url', url))
-          FROM marketplace_links 
-          WHERE item_id = ai.id AND item_type = 'Accessory'
-        ), '[]') as marketplace_links,
+            SELECT
+                ai.id,
+                acc.name,
+                ai.serial_number,
+                ai.status,
+                ai.condition,
+                ai.condition_score,
+                'Accessory' as type,
+                ai.purchase_price::float,
+                    ai.est_sell_price::float,
+                    ai.notes,
+                ai.created_at,
+                to_char(ai.purchase_date, 'YYYY-MM-DD'),
 
-        -- Bundle Items (Aksesoris tidak punya bundle anak)
-        '[]'::json as bundle_items
+                COALESCE(img.image_urls, '[]'),
+                COALESCE(mp.marketplace_links, '[]'),
+                '[]'::json
 
-      FROM accessory_items ai
-      JOIN accessories acc ON ai.accessory_id = acc.id
-      WHERE ai.drone_id IS NULL -- Hanya ambil aksesoris lepasan (bukan bundle)
+            FROM accessory_items ai
+                     JOIN accessories acc ON ai.accessory_id = acc.id
 
-      ORDER BY created_at DESC;
+                     LEFT JOIN LATERAL (
+                SELECT json_agg(image_url) as image_urls
+                FROM item_images
+                WHERE item_id = ai.id AND item_type = 'Accessory'
+                    ) img ON true
+
+                     LEFT JOIN LATERAL (
+                SELECT json_agg(
+                               json_build_object(
+                                       'platform', platform,
+                                       'url', url
+                                   )
+                           ) as marketplace_links
+                FROM marketplace_links
+                WHERE item_id = ai.id AND item_type = 'Accessory'
+                    ) mp ON true
+
+            WHERE ai.drone_id IS NULL
+
+            ORDER BY created_at DESC;
     `;
 
         const result = await db.query(query);
@@ -324,9 +340,9 @@ const updateStock = async (req, res) => {
         if (type === 'Drone') {
             await client.query(`
         UPDATE drones 
-        SET model_id = $1, serial_number = $2, status = $3, condition = $4, condition_score = $5, notes = $6, est_sell_price = $7, purchase_price = $8 
-        WHERE id = $9
-      `, [model_id, serial_number, status, condition, condition_score, notes, est_sell_price, purchase_price, id]);
+        SET model_id = $1, serial_number = $2, status = $3, condition = $4, condition_score = $5, notes = $6, est_sell_price = $7, purchase_price = $8, purchase_date = $9
+        WHERE id = $10
+      `, [model_id, serial_number, status, condition, condition_score, notes, est_sell_price, purchase_price, trxDate, id]);
 
             // --- LOGIC BUNDLE ITEMS (HANYA UNTUK DRONE) ---
             const bundles = JSON.parse(bundle_items); // Parse JSON String
@@ -358,8 +374,8 @@ const updateStock = async (req, res) => {
                         // Update estimasi jual, status, dll (TIDAK update purchase_price)
                         await client.query(`
               UPDATE accessory_items 
-              SET serial_number = $1, status = $2, condition = $3, condition_score = $4, notes = $5, est_sell_price = $6, drone_id = $8
-              WHERE id = $7
+              SET serial_number = $1, status = $2, condition = $3, condition_score = $4, notes = $5, est_sell_price = $6, drone_id = $7, purchase_date = $8
+              WHERE id = $9
             `, [
                             item.serial_number,
                             item.status || status,
@@ -367,8 +383,9 @@ const updateStock = async (req, res) => {
                             item.condition_score,
                             item.notes,
                             item.est_sell_price, // Update harga pasarannya
+                            item.is_detached ? null : id,
+                            trxDate,
                             item.id,
-                            item.is_detached ? null : id
                         ]);
                     } else {
                         console.log('abcdefghid')
