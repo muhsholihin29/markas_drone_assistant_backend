@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const uploadToImgBB = require("../libraries/imageUploader");
 
 const getStockItems = async (req, res) => {
     try {
@@ -20,6 +21,7 @@ const getStockItems = async (req, res) => {
                 d.created_at,
                 to_char(d.purchase_date, 'YYYY-MM-DD') as purchase_date,
 
+                -- COALESCE tetap sama, tapi isinya sekarang berupa array object
                 COALESCE(img.image_urls, '[]') as image_urls,
                 COALESCE(mp.marketplace_links, '[]') as marketplace_links,
                 COALESCE(bundle.bundle_items, '[]') as bundle_items
@@ -27,9 +29,14 @@ const getStockItems = async (req, res) => {
             FROM drones d
                      JOIN drone_models dm ON d.model_id = dm.id
 
--- Images
+-- --- PERUBAHAN 1: Images untuk Drone ---
                      LEFT JOIN LATERAL (
-                SELECT json_agg(image_url) as image_urls
+                SELECT json_agg(
+                               json_build_object(
+                                       'id', id,               -- Tambahkan ID gambar
+                                       'url', image_url        -- Label key 'url'
+                                   )
+                           ) as image_urls
                 FROM item_images
                 WHERE item_id = d.id AND item_type = 'Drone'
                     ) img ON true
@@ -90,8 +97,14 @@ const getStockItems = async (req, res) => {
             FROM accessory_items ai
                      JOIN accessories acc ON ai.accessory_id = acc.id
 
+-- --- PERUBAHAN 2: Images untuk Accessory ---
                      LEFT JOIN LATERAL (
-                SELECT json_agg(image_url) as image_urls
+                SELECT json_agg(
+                               json_build_object(
+                                       'id', id,               -- Tambahkan ID gambar
+                                       'url', image_url        -- Label key 'url'
+                                   )
+                           ) as image_urls
                 FROM item_images
                 WHERE item_id = ai.id AND item_type = 'Accessory'
                     ) img ON true
@@ -234,11 +247,8 @@ const createStock = async (req, res) => {
         // D. HANDLE IMAGE UPLOAD (Files dari Multer)
         if (req.files && req.files.length > 0) {
             for (const file of req.files) {
-                // Di Real production, upload file ke Cloud (S3/Cloudinary) lalu simpan URL-nya.
-                // Untuk lokal, kita simpan path statis, misal: http://localhost:3000/uploads/filename.jpg
-
-                // Sesuaikan dengan domain/IP komputer Anda
-                const imageUrl = `http://10.0.2.2:3000/uploads/${file.filename}`;
+                // upload ke ImgBB
+                const imageUrl = await uploadToImgBB(file.path);
 
                 await client.query(`
           INSERT INTO item_images (item_type, item_id, image_url)
@@ -421,6 +431,48 @@ const updateStock = async (req, res) => {
         }
 
         await client.query('COMMIT');
+        // D. HANDLE IMAGE UPDATE
+// Asumsi: Saat user menghapus gambar lama di UI, Flutter akan mengirimkan
+// array berisi ID gambar tersebut melalui req.body.deleted_image_ids
+        if (req.body.deleted_image_ids) {
+            let deletedIds = [];
+            try {
+                // Karena request ini berupa multipart/form-data,
+                // array biasanya diterima sebagai string JSON "[12, 15]"
+                deletedIds = JSON.parse(req.body.deleted_image_ids);
+            } catch (e) {
+                // Fallback jika sudah berupa array
+                deletedIds = req.body.deleted_image_ids;
+            }
+
+            if (Array.isArray(deletedIds) && deletedIds.length > 0) {
+                // 1. Hapus relasi gambar dari database
+                // PENTING: Gunakan validasi item_id agar user tidak bisa sembarangan menghapus gambar barang lain
+                await client.query(`
+            DELETE FROM item_images 
+            WHERE id = ANY($1::int[]) AND item_type = $2 AND item_id = $3
+        `, [deletedIds, type, id]);
+
+                // Catatan Bisnis: ImgBB API standar biasanya tidak menyediakan endpoint
+                // untuk mendelete gambar via API Key. Jadi menghapusnya dari database
+                // Anda sudah cukup agar gambar tersebut tidak muncul lagi di aplikasi.
+            }
+        }
+
+// 2. Upload gambar BARU (Files dari Multer)
+// req.files HANYA berisi foto baru yang di-pick dari galeri/kamera di halaman edit
+        if (req.files && req.files.length > 0) {
+            for (const file of req.files) {
+                // Upload ke ImgBB
+                const imageUrl = await uploadToImgBB(file.path);
+
+                // Insert ke database sebagai gambar tambahan
+                await client.query(`
+            INSERT INTO item_images (item_type, item_id, image_url)
+            VALUES ($1, $2, $3)
+        `, [type, id, imageUrl]);
+            }
+        }
         res.status(200).json({ message: 'Data stok dan bundle berhasil diperbarui' });
 
     } catch (err) {
