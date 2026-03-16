@@ -262,9 +262,10 @@ const createStock = async (req, res) => {
         // 1. Insert Header Transaksi
         const trxHeaderRes = await client.query(`
       INSERT INTO transactions (type, date, total_amount, notes)
-      VALUES ('PURCHASE', trxDate, $1, $2)
+      VALUES ('PURCHASE', $1, $2, $3)
       RETURNING id
     `, [
+            trxDate,
             totalPurchaseAmount,
             `Pembelian Stok Baru: ${name} (${serial_number})`
         ]);
