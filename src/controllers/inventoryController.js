@@ -41,12 +41,16 @@ const getStockItems = async (req, res) => {
                 WHERE item_id = d.id AND item_type = 'Drone'
                     ) img ON true
 
--- Marketplace
+-- Marketplace Drone (DIPERBARUI)
                      LEFT JOIN LATERAL (
                 SELECT json_agg(
                                json_build_object(
+                                       'id', id,
                                        'platform', platform,
-                                       'url', url
+                                       'url', url,
+                                       'platform_price', platform_price::float,
+                                       'admin_fee_pct', admin_fee_pct::float,
+                                       'flat_fee', flat_fee::float
                                    )
                            ) as marketplace_links
                 FROM marketplace_links
@@ -109,11 +113,16 @@ const getStockItems = async (req, res) => {
                 WHERE item_id = ai.id AND item_type = 'Accessory'
                     ) img ON true
 
+                -- Marketplace Accessory (DIPERBARUI)
                      LEFT JOIN LATERAL (
                 SELECT json_agg(
                                json_build_object(
+                                       'id', id,
                                        'platform', platform,
-                                       'url', url
+                                       'url', url,
+                                       'platform_price', platform_price::float,
+                                       'admin_fee_pct', admin_fee_pct::float,
+                                       'flat_fee', flat_fee::float
                                    )
                            ) as marketplace_links
                 FROM marketplace_links
@@ -234,13 +243,19 @@ const createStock = async (req, res) => {
         if (marketplace_links) {
             const links = JSON.parse(marketplace_links);
             for (const link of links) {
-                if (link.url && link.platform) {
-                    await client.query(`
-
-            INSERT INTO marketplace_links (item_type, item_id, platform, url)
-            VALUES ($1, $2, $3, $4)
-          `, [type, itemId, link.platform, link.url]);
-                }
+                await client.query(`
+            INSERT INTO marketplace_links 
+            (item_type, item_id, platform, url, platform_price, admin_fee_pct, flat_fee)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `, [
+                    type, // 'Drone' atau 'Accessory' (Disesuaikan dengan variabel Anda)
+                    itemId, // ID barang yang baru saja dibuat
+                    link.platform,
+                    link.url,
+                    link.platform_price || null, // Null jika harga tidak diisi
+                    link.admin_fee_pct || 0,
+                    link.flat_fee || 0
+                ]);
             }
         }
 
@@ -285,6 +300,37 @@ const createStock = async (req, res) => {
           INSERT INTO transaction_items (transaction_id, item_type, item_id, price, quantity)
           VALUES ($1, 'Accessory', $2, $3, 1)
         `, [transactionId, bundleObj.id, bundleObj.price]);
+            }
+        }
+
+        // --- DI DALAM createStock ---
+
+// Parsing data String JSON dari req.body
+        let mpLinks = [];
+        if (req.body.marketplace_links) {
+            try {
+                mpLinks = JSON.parse(marketplace_links);
+            } catch (e) {
+                console.error("Gagal parsing marketplace_links:", e);
+            }
+        }
+
+// Looping dan Insert ke tabel marketplace_links
+        if (mpLinks.length > 0) {
+            for (const link of mpLinks) {
+                await client.query(`
+            INSERT INTO marketplace_links 
+            (item_type, item_id, platform, url, platform_price, admin_fee_pct, flat_fee)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `, [
+                    type, // 'Drone' atau 'Accessory' (Disesuaikan dengan variabel Anda)
+                    itemId, // ID barang yang baru saja dibuat
+                    link.platform,
+                    link.url,
+                    link.platform_price || null, // Null jika harga tidak diisi
+                    link.admin_fee_pct || 0,
+                    link.flat_fee || 0
+                ]);
             }
         }
 
@@ -338,7 +384,8 @@ const updateStock = async (req, res) => {
         est_sell_price,
         purchase_price,
         purchase_date,
-        bundle_items // Array of objects dari frontend
+        bundle_items, // Array of objects dari frontend
+        marketplace_links
     } = req.body;
 
     const trxDate = purchase_date ? purchase_date : new Date();
@@ -472,6 +519,43 @@ const updateStock = async (req, res) => {
             INSERT INTO item_images (item_type, item_id, image_url)
             VALUES ($1, $2, $3)
         `, [type, id, imageUrl]);
+            }
+        }
+
+        // Parsing data String JSON dari req.body
+        let mpLinks = [];
+        if (marketplace_links) {
+            try {
+                mpLinks = JSON.parse(marketplace_links);
+            } catch (e) {
+                console.error("Gagal parsing marketplace_links:", e);
+            }
+        }
+
+        // 1. HAPUS SEMUA LINK LAMA (Berdasarkan item_id dan item_type)
+// Ini menjamin link yang dihapus oleh user di aplikasi Flutter benar-benar lenyap dari DB
+        await client.query(`
+    DELETE FROM marketplace_links 
+    WHERE item_type = $1 AND item_id = $2
+`, [type, id]); // Sesuaikan nama variabel tipe dan ID Anda
+
+// 2. INSERT ULANG SEMUA LINK DARI REQUEST FLUTTER
+// Array dari Flutter sudah merepresentasikan state/kondisi terbaru yang diinginkan user
+        if (mpLinks.length > 0) {
+            for (const link of mpLinks) {
+                await client.query(`
+            INSERT INTO marketplace_links 
+            (item_type, item_id, platform, url, platform_price, admin_fee_pct, flat_fee)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `, [
+                    type,
+                    id,
+                    link.platform,
+                    link.url,
+                    link.platform_price || null,
+                    link.admin_fee_pct || 0,
+                    link.flat_fee || 0
+                ]);
             }
         }
         res.status(200).json({ message: 'Data stok dan bundle berhasil diperbarui' });
