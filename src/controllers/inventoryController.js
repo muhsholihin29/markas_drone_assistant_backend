@@ -643,16 +643,12 @@ const addStockAdjustment = async (req, res) => {
 };
 
 const getStockDetail = async (req, res) => {
-    const { itemType, id } = req.params; // itemType: 'drones' atau 'accessory_items'
+    const { itemType, id } = req.params;
     const client = await db.pool.connect();
 
     try {
-        // 1. Tentukan Nama Item Type untuk Query Transaction (Singular/Capitalized)
-        // 'drones' -> 'Drone', 'accessory_items' -> 'Accessory'
         const trxItemType = itemType === 'drones' ? 'Drone' : 'Accessory';
 
-        // 2. Query Utama (Data Stok + History Keuangan)
-        // Kita gunakan LEFT JOIN atau Subquery untuk mengambil total repair/refund
         let queryText = '';
 
         if (itemType === 'drones') {
@@ -660,40 +656,110 @@ const getStockDetail = async (req, res) => {
         SELECT 
           d.*,
           m.model_name as name,
-          -- Hitung Total Repair (+)
+
+          -- REPAIR & REFUND
           COALESCE((
             SELECT SUM(price) FROM transaction_items ti 
             JOIN transactions t ON ti.transaction_id = t.id 
             WHERE ti.item_type = 'Drone' AND ti.item_id = d.id AND t.type = 'REPAIR'
           ), 0) as total_repairs,
-          -- Hitung Total Refund (-)
+
           COALESCE((
             SELECT SUM(price) FROM transaction_items ti 
             JOIN transactions t ON ti.transaction_id = t.id 
             WHERE ti.item_type = 'Drone' AND ti.item_id = d.id AND t.type = 'REFUND'
-          ), 0) as total_refunds
+          ), 0) as total_refunds,
+
+          -- ✅ IMAGES
+          COALESCE(img.image_urls, '[]') as image_urls,
+
+          -- ✅ MARKETPLACE
+          COALESCE(mp.marketplace_links, '[]') as marketplace_links
+
         FROM drones d
         LEFT JOIN drone_models m ON d.model_id = m.id
+
+        LEFT JOIN LATERAL (
+          SELECT json_agg(
+            json_build_object(
+              'id', id,
+              'url', image_url
+            )
+          ) as image_urls
+          FROM item_images
+          WHERE item_id = d.id AND item_type = 'Drone'
+        ) img ON true
+
+        LEFT JOIN LATERAL (
+          SELECT json_agg(
+            json_build_object(
+              'id', id,
+              'platform', platform,
+              'url', url,
+              'platform_price', platform_price::float,
+              'admin_fee_pct', admin_fee_pct::float,
+              'flat_fee', flat_fee::float
+            )
+          ) as marketplace_links
+          FROM marketplace_links
+          WHERE item_id = d.id AND item_type = 'Drone'
+        ) mp ON true
+
         WHERE d.id = $1
       `;
         } else {
-            // Logic untuk Accessory Items
             queryText = `
         SELECT 
           a.*,
           am.name,
+
           COALESCE((
             SELECT SUM(price) FROM transaction_items ti 
             JOIN transactions t ON ti.transaction_id = t.id 
             WHERE ti.item_type = 'Accessory' AND ti.item_id = a.id AND t.type = 'REPAIR'
           ), 0) as total_repairs,
+
           COALESCE((
             SELECT SUM(price) FROM transaction_items ti 
             JOIN transactions t ON ti.transaction_id = t.id 
             WHERE ti.item_type = 'Accessory' AND ti.item_id = a.id AND t.type = 'REFUND'
-          ), 0) as total_refunds
+          ), 0) as total_refunds,
+
+          -- ✅ IMAGES
+          COALESCE(img.image_urls, '[]') as image_urls,
+
+          -- ✅ MARKETPLACE
+          COALESCE(mp.marketplace_links, '[]') as marketplace_links
+
         FROM accessory_items a
         LEFT JOIN accessories am ON a.accessory_id = am.id
+
+        LEFT JOIN LATERAL (
+          SELECT json_agg(
+            json_build_object(
+              'id', id,
+              'url', image_url
+            )
+          ) as image_urls
+          FROM item_images
+          WHERE item_id = a.id AND item_type = 'Accessory'
+        ) img ON true
+
+        LEFT JOIN LATERAL (
+          SELECT json_agg(
+            json_build_object(
+              'id', id,
+              'platform', platform,
+              'url', url,
+              'platform_price', platform_price::float,
+              'admin_fee_pct', admin_fee_pct::float,
+              'flat_fee', flat_fee::float
+            )
+          ) as marketplace_links
+          FROM marketplace_links
+          WHERE item_id = a.id AND item_type = 'Accessory'
+        ) mp ON true
+
         WHERE a.id = $1
       `;
         }
@@ -706,7 +772,7 @@ const getStockDetail = async (req, res) => {
 
         const itemData = itemRes.rows[0];
 
-        // 3. Jika Drone, Ambil Bundle Items (Aksesoris bawaan)
+        // Bundle (khusus drone)
         let bundleItems = [];
         if (itemType === 'drones') {
             const bundleRes = await client.query(`
@@ -718,16 +784,20 @@ const getStockDetail = async (req, res) => {
         LEFT JOIN accessories am ON ai.accessory_id = am.id
         WHERE ai.drone_id = $1
       `, [id]);
+
             bundleItems = bundleRes.rows;
         }
 
-        // 4. Gabungkan Data
         const fullData = {
             ...itemData,
-            bundle_items: bundleItems, // Backend kirim snake_case
-            // Pastikan format Marketplace Link & Images di-parse jika tersimpan sebagai JSON String di DB
-            marketplace_links: typeof itemData.marketplace_links === 'string' ? JSON.parse(itemData.marketplace_links) : itemData.marketplace_links,
-            image_urls: typeof itemData.image_urls === 'string' ? JSON.parse(itemData.image_urls) : itemData.image_urls
+            bundle_items: bundleItems,
+            marketplace_links: typeof itemData.marketplace_links === 'string'
+                ? JSON.parse(itemData.marketplace_links)
+                : itemData.marketplace_links,
+            image_urls: typeof itemData.image_urls === 'string'
+                ? JSON.parse(itemData.image_urls)
+                : itemData.image_urls,
+            type: trxItemType
         };
 
         res.json(fullData);
