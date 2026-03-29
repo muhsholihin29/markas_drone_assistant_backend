@@ -22,9 +22,7 @@ const getStockItems = async (req, res) => {
                 to_char(d.purchase_date, 'YYYY-MM-DD') as purchase_date,
 
                 -- COALESCE tetap sama, tapi isinya sekarang berupa array object
-                COALESCE(img.image_urls, '[]') as image_urls,
-                COALESCE(mp.marketplace_links, '[]') as marketplace_links,
-                COALESCE(bundle.bundle_items, '[]') as bundle_items
+                COALESCE(img.image_urls, '[]') as image_urls
 
             FROM drones d
                      JOIN drone_models dm ON d.model_id = dm.id
@@ -41,42 +39,6 @@ const getStockItems = async (req, res) => {
                 WHERE item_id = d.id AND item_type = 'Drone'
                     ) img ON true
 
--- Marketplace Drone (DIPERBARUI)
-                     LEFT JOIN LATERAL (
-                SELECT json_agg(
-                               json_build_object(
-                                       'id', id,
-                                       'platform', platform,
-                                       'url', url,
-                                       'platform_price', platform_price::float,
-                                       'admin_fee_pct', admin_fee_pct::float,
-                                       'flat_fee', flat_fee::float
-                                   )
-                           ) as marketplace_links
-                FROM marketplace_links
-                WHERE item_id = d.id AND item_type = 'Drone'
-                    ) mp ON true
-
--- Bundle accessories
-                     LEFT JOIN LATERAL (
-                SELECT json_agg(
-                               json_build_object(
-                                       'id', ai.id,
-                                       'name', acc.name,
-                                       'serial_number', ai.serial_number,
-                                       'condition', ai.condition,
-                                       'score', ai.condition_score,
-                                       'status', ai.status,
-                                       'note', ai.notes,
-                                       'purchase_price', ai.purchase_price::float,
-                                       'est_sell_price', ai.est_sell_price::float,
-                                       'purchase_date', to_char(ai.purchase_date, 'YYYY-MM-DD')
-                                   )
-                           ) as bundle_items
-                FROM accessory_items ai
-                         JOIN accessories acc ON ai.accessory_id = acc.id
-                WHERE ai.drone_id = d.id
-                    ) bundle ON true
 
             UNION ALL
 
@@ -94,9 +56,7 @@ const getStockItems = async (req, res) => {
                 ai.created_at,
                 to_char(ai.purchase_date, 'YYYY-MM-DD'),
 
-                COALESCE(img.image_urls, '[]'),
-                COALESCE(mp.marketplace_links, '[]'),
-                '[]'::json
+                COALESCE(img.image_urls, '[]')
 
             FROM accessory_items ai
                      JOIN accessories acc ON ai.accessory_id = acc.id
@@ -112,22 +72,6 @@ const getStockItems = async (req, res) => {
                 FROM item_images
                 WHERE item_id = ai.id AND item_type = 'Accessory'
                     ) img ON true
-
-                -- Marketplace Accessory (DIPERBARUI)
-                     LEFT JOIN LATERAL (
-                SELECT json_agg(
-                               json_build_object(
-                                       'id', id,
-                                       'platform', platform,
-                                       'url', url,
-                                       'platform_price', platform_price::float,
-                                       'admin_fee_pct', admin_fee_pct::float,
-                                       'flat_fee', flat_fee::float
-                                   )
-                           ) as marketplace_links
-                FROM marketplace_links
-                WHERE item_id = ai.id AND item_type = 'Accessory'
-                    ) mp ON true
 
             WHERE ai.drone_id IS NULL
 
