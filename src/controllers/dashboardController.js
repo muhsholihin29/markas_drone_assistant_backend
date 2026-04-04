@@ -75,36 +75,86 @@ const getDashboardData = async (req, res) => {
         LIMIT 1
       `),
 
-            // 8. Market Insights (3 Best Price)
+            // 8. Market Insights (urutkan berdasarkan margin terbesar)
             db.query(`
-        SELECT dm.model_name, mi.price
+        SELECT
+          mi.id,
+          mi.item_type AS type,
+          COALESCE(mi.source_platform, '') AS source_platform,
+          COALESCE(mi.link, '') AS link,
+          COALESCE(mi.price::float, 0) AS price,
+          COALESCE(mi.status, '') AS status,
+          mi.created_at,
+
+          CASE
+            WHEN mi.item_type = 'Drone' THEN COALESCE(dsm.name, '')
+            WHEN mi.item_type = 'Accessory' THEN COALESCE(acc.name, '')
+            ELSE ''
+          END AS name,
+
+          CASE
+            WHEN mi.item_type = 'Drone' THEN COALESCE(md.condition, '')
+            WHEN mi.item_type = 'Accessory' THEN COALESCE(mac.condition, '')
+            ELSE ''
+          END AS condition,
+
+          COALESCE(
+            CASE
+              WHEN mi.item_type = 'Drone' THEN md.condition_score
+              WHEN mi.item_type = 'Accessory' THEN mac.condition_score
+            END,
+            0
+          ) AS condition_score,
+
+          COALESCE(ma.fair_price::float, 0) AS fair_price,
+          COALESCE(ma.price_score, 0) AS price_score,
+          COALESCE(ma.condition_score, 0) AS analysis_condition_score,
+          COALESCE(ma.completeness_score, 0) AS completeness_score,
+          COALESCE(ma.profit_prediction::float, 0) AS profit_prediction,
+          COALESCE(ma.buy_recommendation, '') AS buy_recommendation,
+
+          COALESCE(
+            ma.profit_prediction,
+            (ma.fair_price - mi.price),
+            0
+          )::float AS margin
+
         FROM market_items mi
-        JOIN drone_models dm ON mi.drone_model_id = dm.id
-        WHERE mi.status IN ('active', 'watchlist')
-        ORDER BY mi.price ASC 
+        LEFT JOIN market_drones md
+          ON mi.item_type = 'Drone'
+         AND md.id = mi.id
+        LEFT JOIN drone_sub_models dsm
+          ON md.sub_model_id = dsm.id
+
+        LEFT JOIN market_accessories mac
+          ON mi.item_type = 'Accessory'
+         AND mac.id = mi.id
+        LEFT JOIN accessories acc
+          ON mac.accessory_id = acc.id
+
+        LEFT JOIN market_analysis ma
+          ON ma.market_item_id = mi.id
+
+        WHERE mi.status IN ('Active', 'Watchlist')
+        ORDER BY margin DESC, mi.created_at DESC
         LIMIT 3
       `)
         ]);
 
         // --- PROCESSING DATA ---
 
-        // Helper untuk konversi string angka dari Postgres (SUM/COUNT return string) ke Number/Float
         const parseNum = (val) => Number(val) || 0;
 
         const salesData = salesOverviewResult.rows[0];
 
-        // Logika Profit Change (Dummy calculation karena butuh data bulan lalu yang kompleks)
-        // Di real case, Anda perlu query terpisah untuk bulan lalu.
         const profitChange = 12.5;
         const isProfitUp = true;
 
-        // Mapping Top Selling ke format array angka
         const topSellingDataPoints = topSellingResult.rows.map(r => parseNum(r.units_sold));
         const topSellingDescription = topSellingResult.rows.length > 0
             ? `${topSellingResult.rows[0].model_name} (${topSellingResult.rows[0].units_sold} Unit)`
             : 'Belum ada data';
 
-        // Gabungkan Alerts
         const alerts = [];
         if (alertsReadyResult.rows.length > 0) {
             alerts.push({
@@ -121,14 +171,22 @@ const getDashboardData = async (req, res) => {
             });
         }
 
-        // Mapping Market Insights
         const marketInsights = marketInsightsResult.rows.map(row => ({
-            model: row.model_name,
-            price: parseNum(row.price)
+            id: row.id,
+            type: row.type,
+            name: row.name || '',
+            condition: row.condition || '',
+            condition_score: parseNum(row.condition_score),
+            price: parseNum(row.price),
+            fair_price: parseNum(row.fair_price),
+            margin: parseNum(row.margin),
+            buy_recommendation: row.buy_recommendation || '',
+            source_platform: row.source_platform || '',
+            link: row.link || '',
+            status: row.status || '',
+            created_at: row.created_at || null
         }));
 
-
-        // --- CONSTRUCT FINAL JSON ---
         const responseData = {
             sales_overview: {
                 total_sales: parseNum(salesData.total_sales),
@@ -157,10 +215,9 @@ const getDashboardData = async (req, res) => {
                 {
                     title: "Top Selling Model",
                     description: topSellingDescription,
-                    data_points: topSellingDataPoints // [12, 8, 5]
+                    data_points: topSellingDataPoints
                 },
                 {
-                    // Dummy logic untuk Margin & Health (Logic query-nya cukup kompleks, bisa ditambahkan nanti)
                     title: "Average Margin",
                     description: "Avg Profit: 18.5%",
                     data_points: [0.15, 0.18, 0.20]

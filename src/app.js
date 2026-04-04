@@ -8,6 +8,7 @@ const dashboardRoutes = require('./routes/dashboardRoutes');
 const catalogRoutes = require('./routes/catalogRoutes');
 const inventoryRoutes = require('./routes/inventoryRoutes');
 const transactionRoutes = require('./routes/transactionRoutes');
+const buyAssistantRoutes = require('./routes/buyAssistantRoutes');
 const path = require("path");
 
 const app = express();
@@ -72,6 +73,7 @@ app.use('/api/v1/dashboard', dashboardRoutes);
 app.use('/api/v1/catalog', catalogRoutes);
 app.use('/api/v1/inventory', inventoryRoutes);
 app.use('/api/v1/transactions', transactionRoutes);
+app.use('/api/v1/buy-assistant', buyAssistantRoutes);
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // Root Endpoint (Cek server nyala/nggak)
