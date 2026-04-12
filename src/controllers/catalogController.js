@@ -98,13 +98,13 @@ const createAccessory = async (req, res) => {
 // 7. Update Drone Model
 const updateDroneModel = async (req, res) => {
     const { id } = req.params;
-    const { brand, model_name, category, est_buy_price, est_sell_price } = req.body;
+    const { brand, model_name, category, default_est_buy_price, default_est_sell_price } = req.body;
     try {
         const result = await db.query(
             `UPDATE drone_models 
        SET brand=$1, model_name=$2, category=$3, default_est_buy_price=$4, default_est_sell_price=$5 
        WHERE id=$6 RETURNING *`,
-            [brand, model_name, category, parsePrice(est_buy_price), parsePrice(est_sell_price), id]
+            [brand, model_name, category, parsePrice(default_est_buy_price), parsePrice(default_est_sell_price), id]
         );
         if (result.rows.length === 0) return res.status(404).send('Model not found');
         res.json(result.rows[0]);
@@ -172,13 +172,13 @@ const deleteDroneSubModel = async (req, res) => {
 // 11. Update Accessory
 const updateAccessory = async (req, res) => {
     const { id } = req.params;
-    const { name, type, est_buy_price, est_sell_price, compatible_drone_ids } = req.body;
+    const { name, type, default_est_buy_price, default_est_sell_price, compatible_drone_ids } = req.body;
     try {
         const result = await db.query(
             `UPDATE accessories 
        SET name=$1, type=$2, default_est_buy_price=$3, default_est_sell_price=$4, compatible_drone_model_ids=$5 
        WHERE id=$6 RETURNING *`,
-            [name, type, parsePrice(est_buy_price), parsePrice(est_sell_price), JSON.stringify(compatible_drone_ids), id]
+            [name, type, parsePrice(default_est_buy_price), parsePrice(default_est_sell_price), JSON.stringify(compatible_drone_ids), id]
         );
         if (result.rows.length === 0) return res.status(404).send('Accessory not found');
         res.json(result.rows[0]);

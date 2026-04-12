@@ -9,7 +9,7 @@ const getStockItems = async (req, res) => {
         const query = `
             SELECT
                 d.id,
-                dm.model_name as name,
+                COALESCE(dsm.name, dm.model_name) as name,
                 d.serial_number,
                 d.status,
                 d.condition,
@@ -20,12 +20,14 @@ const getStockItems = async (req, res) => {
                     d.notes,
                 d.created_at,
                 to_char(d.purchase_date, 'YYYY-MM-DD') as purchase_date,
+                d.sub_model_id,
 
                 -- COALESCE tetap sama, tapi isinya sekarang berupa array object
                 COALESCE(img.image_urls, '[]') as image_urls
 
             FROM drones d
                      JOIN drone_models dm ON d.model_id = dm.id
+                     LEFT JOIN drone_sub_models dsm ON d.sub_model_id = dsm.id
 
 -- --- PERUBAHAN 1: Images untuk Drone ---
                      LEFT JOIN LATERAL (
@@ -55,6 +57,7 @@ const getStockItems = async (req, res) => {
                     ai.notes,
                 ai.created_at,
                 to_char(ai.purchase_date, 'YYYY-MM-DD'),
+                NULL::int as sub_model_id,
 
                 COALESCE(img.image_urls, '[]')
 
@@ -107,7 +110,7 @@ const createStock = async (req, res) => {
         // Data dikirim via form-data, jadi perlu diparse
         // req.body berisi field text, req.files berisi gambar
         const {
-            type, model_id, name, serial_number, condition, condition_score,
+            type, model_id, sub_model_id, name, serial_number, condition, condition_score,
             status, purchase_price, est_sell_price, notes,
             marketplace_links, bundle_items, purchase_date
         } = req.body;
@@ -120,9 +123,9 @@ const createStock = async (req, res) => {
         // A. INSERT KE TABEL UTAMA (DRONES / ACCESSORY_ITEMS)
         if (type === 'Drone') {
             const droneRes = await client.query(`
-        INSERT INTO drones (model_id, serial_number, purchase_price, est_sell_price, status, condition, condition_score, notes, purchase_date)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id
-      `, [model_id, serial_number, purchase_price, est_sell_price, status, condition, condition_score || null, notes, trxDate]);
+        INSERT INTO drones (model_id, sub_model_id, serial_number, purchase_price, est_sell_price, status, condition, condition_score, notes, purchase_date)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id
+      `, [model_id, sub_model_id || null, serial_number, purchase_price, est_sell_price, status, condition, condition_score || null, notes, trxDate]);
             itemId = droneRes.rows[0].id;
 
             // B. INSERT BUNDLE ITEMS (Jika Ada)
@@ -320,6 +323,7 @@ const updateStock = async (req, res) => {
     const {
         type,
         model_id,
+        sub_model_id,
         serial_number,
         status,
         condition,
@@ -341,10 +345,10 @@ const updateStock = async (req, res) => {
         // 1. UPDATE DATA UTAMA (BODY)
         if (type === 'Drone') {
             await client.query(`
-        UPDATE drones 
-        SET model_id = $1, serial_number = $2, status = $3, condition = $4, condition_score = $5, notes = $6, est_sell_price = $7, purchase_price = $8, purchase_date = $9
-        WHERE id = $10
-      `, [model_id, serial_number, status, condition, condition_score, notes, est_sell_price, purchase_price, trxDate, id]);
+        UPDATE drones
+        SET model_id = $1, sub_model_id = $2, serial_number = $3, status = $4, condition = $5, condition_score = $6, notes = $7, est_sell_price = $8, purchase_price = $9, purchase_date = $10
+        WHERE id = $11
+      `, [model_id, sub_model_id || null, serial_number, status, condition, condition_score, notes, est_sell_price, purchase_price, trxDate, id]);
 
             // --- LOGIC BUNDLE ITEMS (HANYA UNTUK DRONE) ---
             const bundles = JSON.parse(bundle_items); // Parse JSON String
@@ -599,7 +603,7 @@ const getStockDetail = async (req, res) => {
             queryText = `
         SELECT 
           d.*,
-          m.model_name as name,
+          COALESCE(dsm.name, m.model_name) as name,
 
           -- REPAIR & REFUND
           COALESCE((
@@ -622,6 +626,7 @@ const getStockDetail = async (req, res) => {
 
         FROM drones d
         LEFT JOIN drone_models m ON d.model_id = m.id
+        LEFT JOIN drone_sub_models dsm ON d.sub_model_id = dsm.id
 
         LEFT JOIN LATERAL (
           SELECT json_agg(
@@ -807,4 +812,3 @@ const getAvailableAccessories = async (req, res) => {
 
 
 module.exports = { createStock, deleteStock, updateStock, getStockItems, addStockAdjustment, getStockDetail, getAvailableAccessories };
-
