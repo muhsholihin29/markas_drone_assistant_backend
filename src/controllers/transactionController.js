@@ -2,7 +2,7 @@ const db = require('../config/db');
 
 // POST /transactions/sale
 const createSale = async (req, res) => {
-    const { date, total_price, notes, items } = req.body;
+    const { date, total_price, notes, items, platform } = req.body;
     const client = await db.pool.connect();
 
     try {
@@ -75,11 +75,11 @@ const createSale = async (req, res) => {
         // 3. Buat Record Transaksi Induk (The Snapshot)
         const trxDate = date ? date : new Date();
         const insertTrxQuery = `
-      INSERT INTO transactions (type, date, total_amount, total_cogs, notes)
-      VALUES ('SALE', $1, $2, $3, $4)
+      INSERT INTO transactions (type, date, total_amount, total_cogs, notes, platform)
+      VALUES ('SALE', $1, $2, $3, $4, $5)
       RETURNING id;
     `;
-        const trxRes = await client.query(insertTrxQuery, [trxDate, total_price, totalCogs, notes]);
+        const trxRes = await client.query(insertTrxQuery, [trxDate, total_price, totalCogs, notes, platform]);
         const transactionId = trxRes.rows[0].id;
 
         // 4. Masukkan Detail Transaksi (transaction_items)
@@ -112,4 +112,120 @@ const createSale = async (req, res) => {
 };
 
 
-module.exports = { createSale };
+// GET /api/v1/transactions
+const getTransactions = async (req, res) => {
+    try {
+        const { type, status, platform, month, year, search, start_date, end_date } = req.query;
+
+        let query = `
+            SELECT 
+                t.id,
+                COALESCE(
+                    (SELECT dm.model_name 
+                     FROM transaction_items ti 
+                     JOIN drones d ON ti.item_id = d.id 
+                     JOIN drone_models dm ON d.model_id = dm.id 
+                     WHERE ti.transaction_id = t.id AND ti.item_type = 'Drone' 
+                     LIMIT 1),
+                    (SELECT acc.name 
+                     FROM transaction_items ti 
+                     JOIN accessory_items ai ON ti.item_id = ai.id 
+                     JOIN accessories acc ON ai.accessory_id = acc.id 
+                     WHERE ti.transaction_id = t.id AND ti.item_type = 'Accessory' 
+                     LIMIT 1)
+                ) as title,
+                t.date,
+                t.total_amount::float as amount,
+                (t.total_amount - t.total_cogs)::float as profit,
+                t.notes,
+                t.type,
+                'Success' as status -- Berdasarkan contoh respons, status tampaknya hardcoded Success atau bisa diambil dari data jika ada
+            FROM transactions t
+            WHERE 1=1
+        `;
+
+        const params = [];
+        let paramCount = 1;
+
+        if (type) {
+            query += ` AND t.type = $${paramCount++}`;
+            params.push(type);
+        }
+
+        if (platform) {
+            query += ` AND t.notes = $${paramCount++}`;
+            params.push(platform);
+        }
+
+        if (month) {
+            query += ` AND EXTRACT(MONTH FROM t.date) = $${paramCount++}`;
+            params.push(month);
+        }
+
+        if (year) {
+            query += ` AND EXTRACT(YEAR FROM t.date) = $${paramCount++}`;
+            params.push(year);
+        }
+
+        if (start_date) {
+            query += ` AND t.date >= $${paramCount++}`;
+            params.push(start_date);
+        }
+
+        if (end_date) {
+            query += ` AND t.date <= $${paramCount++}`;
+            params.push(end_date);
+        }
+
+        if (search) {
+            query += ` AND EXISTS (
+                SELECT 1 FROM transaction_items ti 
+                LEFT JOIN drones d ON ti.item_id = d.id AND ti.item_type = 'Drone'
+                LEFT JOIN drone_models dm ON d.model_id = dm.id
+                LEFT JOIN accessory_items ai ON ti.item_id = ai.id AND ti.item_type = 'Accessory'
+                LEFT JOIN accessories acc ON ai.accessory_id = acc.id
+                WHERE ti.transaction_id = t.id AND (
+                    dm.model_name ILIKE $${paramCount} OR 
+                    acc.name ILIKE $${paramCount} OR 
+                    t.notes ILIKE $${paramCount}
+                )
+            )`;
+            params.push(`%${search}%`);
+            paramCount++;
+        }
+
+        query += ` ORDER BY t.date DESC`;
+
+        const result = await db.query(query, params);
+
+        // Calculate Summary
+        const summaryQuery = `
+            SELECT 
+                SUM(t.amount)::float as total_amount,
+                SUM(t.profit)::float as total_profit,
+                COUNT(t.id)::int as total_count
+            FROM (
+                ${query.split('ORDER BY')[0]}
+            ) t
+        `;
+
+        const summaryRes = await db.query(summaryQuery, params);
+        const summary = summaryRes.rows[0] || { total_amount: 0, total_profit: 0, total_count: 0 };
+
+        res.json({
+            transactions: result.rows,
+            summary: {
+                total_amount: summary.total_amount || 0,
+                total_profit: summary.total_profit || 0,
+                total_count: summary.total_count || 0
+            }
+        });
+
+    } catch (err) {
+        console.error("Get Transactions Error:", err);
+        res.status(500).json({ error: err.message });
+    }
+};
+
+
+module.exports = { createSale, getTransactions };
