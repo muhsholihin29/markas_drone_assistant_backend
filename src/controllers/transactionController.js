@@ -138,6 +138,7 @@ const getTransactions = async (req, res) => {
                 t.total_amount::float as amount,
                 (t.total_amount - t.total_cogs)::float as profit,
                 t.notes,
+                t.platform,
                 t.type,
                 'Success' as status -- Berdasarkan contoh respons, status tampaknya hardcoded Success atau bisa diambil dari data jika ada
             FROM transactions t
@@ -153,7 +154,7 @@ const getTransactions = async (req, res) => {
         }
 
         if (platform) {
-            query += ` AND t.notes = $${paramCount++}`;
+            query += ` AND t.platform = $${paramCount++}`;
             params.push(platform);
         }
 
