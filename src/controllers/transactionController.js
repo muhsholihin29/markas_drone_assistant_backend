@@ -129,7 +129,7 @@ const getTransactions = async (req, res) => {
                      WHERE ti.transaction_id = t.id AND ti.item_type = 'Accessory' 
                      LIMIT 1)
                 ) as title,
-                t.date,
+                t.date::text,
                 t.total_amount::float as amount,
                 (t.total_amount - t.total_cogs)::float as profit,
                 t.notes,
@@ -223,5 +223,108 @@ const getTransactions = async (req, res) => {
     }
 };
 
+// GET /api/v1/transactions/:id
+const getTransactionDetails = async (req, res) => {
+    try {
+        const { id } = req.params;
 
-module.exports = { createSale, getTransactions };
+        // 1. Get main transaction data
+        const trxQuery = `
+            SELECT 
+                t.id, t.date::text as date, t.total_amount, t.total_cogs, 
+                t.notes, t.platform, t.type
+            FROM transactions t
+            WHERE t.id = $1
+        `;
+        const trxRes = await db.query(trxQuery, [id]);
+
+        if (trxRes.rowCount === 0) {
+            return res.status(404).json({ message: "Transaksi tidak ditemukan" });
+        }
+
+        const transaction = trxRes.rows[0];
+
+        // 2. Get transaction items data
+        const itemsQuery = `
+            SELECT 
+                ti.id as transaction_item_id,
+                ti.item_type,
+                ti.item_id,
+                ti.price,
+                ti.cogs,
+                CASE 
+                    WHEN ti.item_type = 'Drone' THEN dm.model_name
+                    WHEN ti.item_type = 'Accessory' THEN acc.name
+                END as item_name,
+                CASE 
+                    WHEN ti.item_type = 'Drone' THEN d.serial_number
+                    WHEN ti.item_type = 'Accessory' THEN ai.serial_number
+                END as serial_number
+            FROM transaction_items ti
+            LEFT JOIN drones d ON ti.item_id = d.id AND ti.item_type = 'Drone'
+            LEFT JOIN drone_models dm ON d.model_id = dm.id
+            LEFT JOIN accessory_items ai ON ti.item_id = ai.id AND ti.item_type = 'Accessory'
+            LEFT JOIN accessories acc ON ai.accessory_id = acc.id
+            WHERE ti.transaction_id = $1
+        `;
+        
+        const itemsRes = await db.query(itemsQuery, [id]);
+        
+        // Format the response
+        transaction.items = itemsRes.rows;
+        
+        // Calculate total profit
+        transaction.total_profit = parseFloat(transaction.total_amount) - parseFloat(transaction.total_cogs);
+
+        res.json({
+            message: "Berhasil mengambil detail transaksi",
+            transaction
+        });
+
+    } catch (err) {
+        console.error("Get Transaction Details Error:", err);
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// DELETE /api/v1/transactions/:id
+const deleteTransaction = async (req, res) => {
+    const { id } = req.params;
+    const client = await db.pool.connect();
+
+    try {
+        await client.query('BEGIN');
+
+        // 1. Get all transaction items
+        const itemsRes = await client.query('SELECT item_id, item_type FROM transaction_items WHERE transaction_id = $1', [id]);
+        
+        // 2. Restore status of each item to 'Ready'
+        for (const item of itemsRes.rows) {
+            const tableName = item.item_type === 'Drone' ? 'drones' : 'accessory_items';
+            await client.query(`UPDATE ${tableName} SET status = 'Ready' WHERE id = $1`, [item.item_id]);
+        }
+
+        // 3. Delete from transaction_items
+        await client.query('DELETE FROM transaction_items WHERE transaction_id = $1', [id]);
+
+        // 4. Delete the transaction itself
+        const delRes = await client.query('DELETE FROM transactions WHERE id = $1 RETURNING id', [id]);
+        
+        if (delRes.rowCount === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ message: "Transaksi tidak ditemukan" });
+        }
+
+        await client.query('COMMIT');
+        res.json({ message: "Transaksi berhasil dihapus dan status barang telah dikembalikan menjadi Ready" });
+
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error("Delete Transaction Error:", err);
+        res.status(500).json({ error: err.message });
+    } finally {
+        client.release();
+    }
+};
+
+module.exports = { createSale, getTransactions, getTransactionDetails, deleteTransaction };

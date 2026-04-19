@@ -622,7 +622,15 @@ const getStockDetail = async (req, res) => {
           COALESCE(img.image_urls, '[]') as image_urls,
 
           -- ✅ MARKETPLACE
-          COALESCE(mp.marketplace_links, '[]') as marketplace_links
+          COALESCE(mp.marketplace_links, '[]') as marketplace_links,
+
+          -- TRANSACTION ID
+          (
+            SELECT ti.transaction_id FROM transaction_items ti 
+            JOIN transactions t ON ti.transaction_id = t.id 
+            WHERE ti.item_type = 'Drone' AND ti.item_id = d.id AND t.type = 'SALE'
+            LIMIT 1
+          ) as transaction_id
 
         FROM drones d
         LEFT JOIN drone_models m ON d.model_id = m.id
@@ -678,7 +686,15 @@ const getStockDetail = async (req, res) => {
           COALESCE(img.image_urls, '[]') as image_urls,
 
           -- ✅ MARKETPLACE
-          COALESCE(mp.marketplace_links, '[]') as marketplace_links
+          COALESCE(mp.marketplace_links, '[]') as marketplace_links,
+
+          -- TRANSACTION ID
+          (
+            SELECT ti.transaction_id FROM transaction_items ti 
+            JOIN transactions t ON ti.transaction_id = t.id 
+            WHERE ti.item_type = 'Accessory' AND ti.item_id = a.id AND t.type = 'SALE'
+            LIMIT 1
+          ) as transaction_id
 
         FROM accessory_items a
         LEFT JOIN accessories am ON a.accessory_id = am.id
