@@ -22,9 +22,8 @@ const createSale = async (req, res) => {
             if (item_type === 'Drone') {
                 queryText = `
           SELECT 
-            purchase_price,
-            COALESCE((SELECT SUM(price) FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id WHERE ti.item_type = 'Drone' AND ti.item_id = $1 AND t.type = 'REPAIR'), 0) as total_repairs,
-            COALESCE((SELECT SUM(price) FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id WHERE ti.item_type = 'Drone' AND ti.item_id = $1 AND t.type = 'REFUND'), 0) as total_refunds
+
+            purchase_price
           FROM drones 
           WHERE id = $1 AND status = 'Ready' 
           FOR UPDATE;
@@ -32,9 +31,7 @@ const createSale = async (req, res) => {
             } else if (item_type === 'Accessory') {
                 queryText = `
           SELECT 
-            purchase_price,
-            COALESCE((SELECT SUM(price) FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id WHERE ti.item_type = 'Accessory' AND ti.item_id = $1 AND t.type = 'REPAIR'), 0) as total_repairs,
-            COALESCE((SELECT SUM(price) FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id WHERE ti.item_type = 'Accessory' AND ti.item_id = $1 AND t.type = 'REFUND'), 0) as total_refunds
+            purchase_price
           FROM accessory_items 
           WHERE id = $1 AND status = 'Ready' 
           FOR UPDATE;
@@ -53,10 +50,8 @@ const createSale = async (req, res) => {
             // B. Hitung Modal (HPP) Final untuk item ini
             const row = itemRes.rows[0];
             const baseModal = parseFloat(row.purchase_price) || 0;
-            const repairs = parseFloat(row.total_repairs) || 0;
-            const refunds = parseFloat(row.total_refunds) || 0;
 
-            const finalCogs = baseModal + repairs - refunds;
+            const finalCogs = baseModal;
             totalCogs += finalCogs; // Tambahkan ke keranjang HPP Induk
 
             // C. Simpan ke array sementara untuk di-insert ke transaction_items nanti
