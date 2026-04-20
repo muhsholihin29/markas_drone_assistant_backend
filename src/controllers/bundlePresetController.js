@@ -3,6 +3,7 @@ const db = require('../config/db');
 exports.getBundlePresets = async (req, res) => {
     try {
         const { itemType, id } = req.params;
+        const mappedItemType = itemType === 'drones' ? 'Drone' : 'Accessory';
 
         const query = `
             WITH target_bundles AS (
@@ -137,7 +138,7 @@ exports.getBundlePresets = async (req, res) => {
             LEFT JOIN bundle_marketplace_agg bma ON tb.bundle_id = bma.bundle_id;
         `;
 
-        const { rows } = await db.query(query, [itemType, id]);
+        const { rows } = await db.query(query, [mappedItemType, id]);
 
         res.status(200).json({
             status: 'success',
