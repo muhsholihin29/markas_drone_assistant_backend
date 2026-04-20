@@ -372,16 +372,13 @@ const updateStock = async (req, res) => {
           `, [detachedIds]);
                 }
 
-                console.log('1aaaaaaaaaaaaaaa')
                 // D. Loop kiriman dari UI untuk UPDATE data aksesoris yang tersisa
                 for (const item of bundles) {
                     if (item.id) {
-                        console.log('aaaaaaaaaaaaaaa')
-                        // Update estimasi jual, status, dll (TIDAK update purchase_price)
                         await client.query(`
               UPDATE accessory_items 
-              SET serial_number = $1, status = $2, condition = $3, condition_score = $4, notes = $5, est_sell_price = $6, drone_id = $7, purchase_date = $8
-              WHERE id = $9
+              SET serial_number = $1, status = $2, condition = $3, condition_score = $4, notes = $5, est_sell_price = $6, drone_id = $7, purchase_date = $8, purchase_price = $9
+              WHERE id = $10
             `, [
                             item.serial_number,
                             item.status || status,
@@ -391,6 +388,7 @@ const updateStock = async (req, res) => {
                             item.est_sell_price, // Update harga pasarannya
                             item.is_detached ? null : id,
                             trxDate,
+                            item.purchase_price,
                             item.id,
                         ]);
                     } else {
@@ -421,9 +419,9 @@ const updateStock = async (req, res) => {
             // Aksesoris eceran tidak punya bundle
             await client.query(`
         UPDATE accessory_items 
-        SET accessory_id = $1, serial_number = $2, status = $3, condition = $4, condition_score = $5, notes = $6, est_sell_price = $7
-        WHERE id = $8
-      `, [model_id, serial_number, status, condition, condition_score, notes, est_sell_price, id]);
+        SET accessory_id = $1, serial_number = $2, status = $3, condition = $4, condition_score = $5, notes = $6, est_sell_price = $7, purchase_price = $8, purchase_date = $9
+        WHERE id = $10
+      `, [model_id, serial_number, status, condition, condition_score, notes, est_sell_price, purchase_price, trxDate, id]);
         }
 
         await client.query('COMMIT');
