@@ -10,6 +10,9 @@ const getDashboardData = async (req, res) => {
             stockRepairResult,
             accessoryResult,
             topSellingResult,
+            avgMarginResult,
+            restockAlertsResult,
+            slowMovingResult,
             alertsReadyResult,
             alertsRepairResult,
             marketInsightsResult
@@ -42,20 +45,116 @@ const getDashboardData = async (req, res) => {
         FROM accessory_items WHERE status = 'Ready'
       `),
 
-            // 5. Analytics: Top Selling Models (Top 4)
+            // 5. Analytics: Top Selling Models
             db.query(`
-        SELECT dm.model_name, COUNT(ti.id) as units_sold
+        SELECT 
+          dm.model_name,
+          SUM(ti.quantity)::int as qty_sold,
+          SUM(ti.price * ti.quantity)::numeric as revenue
         FROM transaction_items ti
+        JOIN transactions t ON ti.transaction_id = t.id
         JOIN drones d ON ti.item_id = d.id
         JOIN drone_models dm ON d.model_id = dm.id
-        JOIN transactions t ON ti.transaction_id = t.id
-        WHERE ti.item_type = 'drone' AND t.type = 'SALE'
+        WHERE ti.item_type = 'Drone' 
+          AND t.type = 'SALE'
+          AND t.date >= CURRENT_DATE - INTERVAL '30 days'
         GROUP BY dm.model_name
-        ORDER BY units_sold DESC
-        LIMIT 4
+        ORDER BY qty_sold DESC
+        LIMIT 5
       `),
 
-            // 6. Alert: Stok Ready Terlama (1 Item)
+            // 6. Analytics: Average Margin (6 months)
+            db.query(`
+        WITH monthly_data AS (
+          SELECT 
+            date_trunc('month', date) as month_date,
+            SUM(total_amount)::numeric as revenue,
+            SUM(total_amount - total_cogs)::numeric as profit
+          FROM transactions
+          WHERE type = 'SALE'
+            AND date >= date_trunc('month', CURRENT_DATE - INTERVAL '5 months')
+          GROUP BY 1
+        )
+        SELECT 
+          to_char(month_date, 'Mon') as period,
+          month_date,
+          profit as total_profit,
+          CASE WHEN revenue > 0 THEN (profit / revenue * 100) ELSE 0 END::numeric as margin_percentage
+        FROM monthly_data
+        ORDER BY month_date ASC
+      `),
+
+            // 7. Analytics: Restock Alerts (Fast Moving)
+            db.query(`
+        WITH stock_data AS (
+          SELECT 
+            dm.id as model_id,
+            dm.model_name,
+            COUNT(d.id)::int as current_stock
+          FROM drone_models dm
+          LEFT JOIN drones d ON dm.id = d.model_id AND d.status = 'Ready'
+          GROUP BY dm.id, dm.model_name
+        ),
+        sales_data AS (
+          SELECT 
+            dm.id as model_id,
+            SUM(ti.quantity)::int as total_sold_60d
+          FROM transaction_items ti
+          JOIN transactions t ON ti.transaction_id = t.id
+          JOIN drones d ON ti.item_id = d.id
+          JOIN drone_models dm ON d.model_id = dm.id
+          WHERE ti.item_type = 'Drone'
+            AND t.type = 'SALE'
+            AND t.date >= CURRENT_DATE - INTERVAL '60 days'
+          GROUP BY dm.id
+        )
+        SELECT 
+          sd.model_name,
+          sd.current_stock,
+          (COALESCE(sld.total_sold_60d, 0) / 2.0)::float as avg_monthly_sales
+        FROM stock_data sd
+        JOIN sales_data sld ON sd.model_id = sld.model_id
+        WHERE sd.current_stock > 0 
+          AND sd.current_stock < (COALESCE(sld.total_sold_60d, 0) / 2.0)
+        ORDER BY (sd.current_stock / NULLIF(COALESCE(sld.total_sold_60d, 0) / 2.0, 0)) ASC
+        LIMIT 5
+      `),
+
+            // 8. Analytics: Slow Moving Stock (Aging Inventory)
+            db.query(`
+        WITH stock_data AS (
+          SELECT 
+            dm.id as model_id,
+            dm.model_name,
+            COUNT(d.id)::int as current_stock
+          FROM drone_models dm
+          LEFT JOIN drones d ON dm.id = d.model_id AND d.status = 'Ready'
+          GROUP BY dm.id, dm.model_name
+        ),
+        last_sale AS (
+          SELECT 
+            dm.id as model_id,
+            MAX(t.date) as last_sale_date
+          FROM transaction_items ti
+          JOIN transactions t ON ti.transaction_id = t.id
+          JOIN drones d ON ti.item_id = d.id
+          JOIN drone_models dm ON d.model_id = dm.id
+          WHERE ti.item_type = 'Drone' AND t.type = 'SALE'
+          GROUP BY dm.id
+        )
+        SELECT 
+          sd.model_name,
+          sd.current_stock,
+          EXTRACT(DAY FROM AGE(CURRENT_DATE, ls.last_sale_date))::int as days_since_last_sale
+        FROM stock_data sd
+        JOIN last_sale ls ON sd.model_id = ls.model_id
+        WHERE sd.current_stock > 0 
+          AND ls.last_sale_date < CURRENT_DATE - INTERVAL '30 days'
+        ORDER BY days_since_last_sale DESC
+        LIMIT 5
+      `),
+
+            // 9. Alert: Stok Ready Terlama (1 Item)
             db.query(`
         SELECT d.id, dm.model_name, EXTRACT(DAY FROM AGE(CURRENT_DATE, d.updated_at)) as days
         FROM drones d
@@ -65,7 +164,7 @@ const getDashboardData = async (req, res) => {
         LIMIT 1
       `),
 
-            // 7. Alert: Stok Repair Terlama (1 Item)
+            // 10. Alert: Stok Repair Terlama (1 Item)
             db.query(`
         SELECT d.id, dm.model_name, EXTRACT(DAY FROM AGE(CURRENT_DATE, d.updated_at)) as days
         FROM drones d
@@ -75,7 +174,7 @@ const getDashboardData = async (req, res) => {
         LIMIT 1
       `),
 
-            // 8. Market Insights (urutkan berdasarkan margin terbesar)
+            // 11. Market Insights (urutkan berdasarkan margin terbesar)
             db.query(`
         SELECT
           mi.id,
@@ -150,10 +249,60 @@ const getDashboardData = async (req, res) => {
         const profitChange = 12.5;
         const isProfitUp = true;
 
-        const topSellingDataPoints = topSellingResult.rows.map(r => parseNum(r.units_sold));
-        const topSellingDescription = topSellingResult.rows.length > 0
-            ? `${topSellingResult.rows[0].model_name} (${topSellingResult.rows[0].units_sold} Unit)`
-            : 'Belum ada data';
+        // 1. Top Selling Model processing
+        const topSellingData = topSellingResult.rows.map((row, index) => ({
+            rank: index + 1,
+            model_name: row.model_name,
+            qty_sold: parseNum(row.qty_sold),
+            revenue: parseNum(row.revenue)
+        }));
+
+        // 2. Average Margin processing
+        const avgMarginRows = avgMarginResult.rows;
+        let avgMarginTotal = 0;
+        const avgMarginData = avgMarginRows.map(row => {
+            const margin = parseNum(row.margin_percentage);
+            avgMarginTotal += margin;
+            return {
+                period: row.period,
+                margin_percentage: Number(margin.toFixed(1)),
+                total_profit: parseNum(row.total_profit)
+            };
+        });
+        const overallAvgMargin = avgMarginRows.length > 0 ? (avgMarginTotal / avgMarginRows.length).toFixed(1) : 0;
+        
+        let trendIndicator = { value: "0%", status: "neutral" };
+        if (avgMarginRows.length >= 2) {
+            const currentMonthMargin = parseNum(avgMarginRows[avgMarginRows.length - 1].margin_percentage);
+            const prevMonthMargin = parseNum(avgMarginRows[avgMarginRows.length - 2].margin_percentage);
+            const diff = currentMonthMargin - prevMonthMargin;
+            trendIndicator = {
+                value: `${diff > 0 ? '+' : ''}${diff.toFixed(1)}%`,
+                status: diff > 0 ? 'positive' : (diff < 0 ? 'negative' : 'neutral')
+            };
+        }
+
+        // 3. Restock Alerts processing
+        const restockData = restockAlertsResult.rows.map(row => {
+            const current = parseNum(row.current_stock);
+            const avg = parseNum(row.avg_monthly_sales);
+            const ratio = avg > 0 ? Math.round((current / avg) * 100) : 0;
+            return {
+                model_name: row.model_name,
+                current_stock: current,
+                avg_monthly_sales: Number(avg.toFixed(1)),
+                status_badge: "Kritis",
+                stock_ratio_percentage: ratio
+            };
+        });
+
+        // 4. Slow Moving processing
+        const slowMovingData = slowMovingResult.rows.map(row => ({
+            model_name: row.model_name,
+            current_stock: parseNum(row.current_stock),
+            days_since_last_sale: parseNum(row.days_since_last_sale),
+            status_badge: "Warning"
+        }));
 
         const alerts = [];
         if (alertsReadyResult.rows.length > 0) {
@@ -213,19 +362,33 @@ const getDashboardData = async (req, res) => {
             ],
             analytics_previews: [
                 {
+                    card_id: "top_selling",
+                    card_type: "list_ranking",
                     title: "Top Selling Model",
-                    description: topSellingDescription,
-                    data_points: topSellingDataPoints
+                    description: "Penjualan terbanyak 30 hari terakhir",
+                    data: topSellingData
                 },
                 {
+                    card_id: "average_margin",
+                    card_type: "area_chart",
                     title: "Average Margin",
-                    description: "Avg Profit: 18.5%",
-                    data_points: [0.15, 0.18, 0.20]
+                    description: `Avg Profit: ${overallAvgMargin}%`,
+                    trend_indicator: trendIndicator,
+                    data: avgMarginData
                 },
                 {
-                    title: "Stock Health Index",
-                    description: "3 Model Overstock",
-                    data_points: [40.0, 30.0, 15.0]
+                    card_id: "restock_alerts",
+                    card_type: "list_progress",
+                    title: "Restock Recommendations",
+                    description: "Barang laku keras, stok menipis",
+                    data: restockData
+                },
+                {
+                    card_id: "slow_moving",
+                    card_type: "list_aging",
+                    title: "Slow Moving Stock",
+                    description: "Perlu evaluasi harga atau promo",
+                    data: slowMovingData
                 }
             ],
             alerts: alerts,
