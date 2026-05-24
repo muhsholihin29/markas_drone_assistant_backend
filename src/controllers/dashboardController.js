@@ -15,6 +15,7 @@ const getDashboardData = async (req, res) => {
             slowMovingResult,
             alertsReadyResult,
             alertsRepairResult,
+            businessWalletResult,
             marketInsightsResult
         ] = await Promise.all([
             // 1. Sales Overview (Bulan Ini)
@@ -174,7 +175,23 @@ const getDashboardData = async (req, res) => {
         LIMIT 1
       `),
 
-            // 11. Market Insights (urutkan berdasarkan margin terbesar)
+            // 11. Business Wallet
+            db.query(`
+        SELECT
+          COALESCE(SUM(CASE
+            WHEN type IN ('SALE', 'CAPITAL_INJECTION', 'LOAN_TAKEN', 'REFUND') THEN ABS(total_amount)
+            WHEN type IN ('PURCHASE', 'LOAN_REPAYMENT', 'REPAIR', 'PRIVE') THEN -ABS(total_amount)
+            ELSE 0
+          END), 0)::numeric AS cash_available,
+          COALESCE(SUM(CASE
+            WHEN type = 'LOAN_TAKEN' THEN ABS(total_amount)
+            WHEN type = 'LOAN_REPAYMENT' THEN -ABS(total_amount)
+            ELSE 0
+          END), 0)::numeric AS savings_debt
+        FROM transactions
+      `),
+
+            // 12. Market Insights (urutkan berdasarkan margin terbesar)
             db.query(`
         SELECT
           mi.id,
@@ -336,6 +353,8 @@ const getDashboardData = async (req, res) => {
             created_at: row.created_at || null
         }));
 
+        const businessWalletData = businessWalletResult.rows[0] || {};
+
         const responseData = {
             sales_overview: {
                 total_sales: parseNum(salesData.total_sales),
@@ -360,6 +379,10 @@ const getDashboardData = async (req, res) => {
                     total_count: parseNum(accessoryResult.rows[0].total_count)
                 }
             ],
+            business_wallet: {
+                cash_available: parseNum(businessWalletData.cash_available),
+                savings_debt: parseNum(businessWalletData.savings_debt)
+            },
             analytics_previews: [
                 {
                     card_id: "top_selling",
