@@ -63,11 +63,13 @@ const getFinancialLedger = async (req, res) => {
                         ELSE 0
                     END), 0)::numeric AS loan_balance
                 FROM transactions
+                WHERE status IN ('SUCCESS', 'PROCESS')
             `),
             db.query(`
                 SELECT type, COALESCE(SUM(ABS(total_amount)), 0)::numeric AS amount
                 FROM transactions
                 WHERE type = ANY($1)
+                  AND status IN ('SUCCESS', 'PROCESS')
                   AND EXTRACT(MONTH FROM date) = $2
                   AND EXTRACT(YEAR FROM date) = $3
                 GROUP BY type
@@ -76,6 +78,7 @@ const getFinancialLedger = async (req, res) => {
                 SELECT type, COALESCE(SUM(ABS(total_amount)), 0)::numeric AS amount
                 FROM transactions
                 WHERE type = ANY($1)
+                  AND status IN ('SUCCESS', 'PROCESS')
                   AND EXTRACT(MONTH FROM date) = $2
                   AND EXTRACT(YEAR FROM date) = $3
                 GROUP BY type
@@ -93,6 +96,7 @@ const getFinancialLedger = async (req, res) => {
                             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                         )::numeric AS balance_after
                     FROM transactions t
+                    WHERE t.status IN ('SUCCESS', 'PROCESS')
                 )
                 SELECT
                     l.id,
@@ -191,10 +195,11 @@ const submitLedgerAction = async (req, res) => {
             .filter(Boolean)
             .join(' | ');
 
+        const trxStatus = req.body.status || 'SUCCESS';
         await db.query(`
-            INSERT INTO transactions (type, date, total_amount, total_cogs, notes, platform)
-            VALUES ($1, $2, $3, 0, $4, NULL)
-        `, [transactionType, date, amount, notes || null]);
+            INSERT INTO transactions (type, date, total_amount, total_cogs, notes, platform, status)
+            VALUES ($1, $2, $3, 0, $4, NULL, $5)
+        `, [transactionType, date, amount, notes || null, trxStatus]);
 
         res.status(201).json({ success: true });
     } catch (err) {

@@ -222,14 +222,16 @@ const createStock = async (req, res) => {
         // --- C. LOGIC BARU: INSERT PURCHASE TRANSACTION ---
 
         // 1. Insert Header Transaksi
+        const trxStatus = req.body.transaction_status || 'SUCCESS';
         const trxHeaderRes = await client.query(`
-      INSERT INTO transactions (type, date, total_amount, notes)
-      VALUES ('PURCHASE', $1, $2, $3)
+      INSERT INTO transactions (type, date, total_amount, notes, status)
+      VALUES ('PURCHASE', $1, $2, $3, $4)
       RETURNING id
     `, [
             trxDate,
             totalPurchaseAmount,
-            `Pembelian Stok Baru: ${name} (${serial_number})`
+            `Pembelian Stok Baru: ${name} (${serial_number})`,
+            trxStatus
         ]);
 
         const transactionId = trxHeaderRes.rows[0].id;
@@ -539,11 +541,12 @@ const addStockAdjustment = async (req, res) => {
         const cleanAmount = parseFloat(amount);
 
         // 2. Insert Header Transaksi (Keuangan)
+        const trxStatus = req.body.status || 'SUCCESS';
         const trxRes = await client.query(`
-      INSERT INTO transactions (type, date, total_amount, notes)
-      VALUES ($1, NOW(), $2, $3)
+      INSERT INTO transactions (type, date, total_amount, notes, status)
+      VALUES ($1, NOW(), $2, $3, $4)
       RETURNING id
-    `, [type, cleanAmount, notes]);
+    `, [type, cleanAmount, notes, trxStatus]);
 
         const trxId = trxRes.rows[0].id;
 

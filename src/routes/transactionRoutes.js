@@ -10,5 +10,7 @@ router.get('/:id', transactionController.getTransactionDetails);
 router.delete('/:id', transactionController.deleteTransaction);
 // POST /api/v1/transactions/sale
 router.post('/sale', transactionController.createSale);
+// PATCH /api/v1/transactions/:id/status
+router.patch('/:id/status', transactionController.updateTransactionStatus);
 
 module.exports = router;

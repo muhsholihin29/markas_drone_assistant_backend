@@ -25,7 +25,8 @@ const getDashboardData = async (req, res) => {
           SUM(t.total_amount) - SUM(t.total_cogs) as total_profit
         FROM transactions t
         WHERE t.type = 'SALE' 
-        AND date_trunc('month', t.date) = date_trunc('month', CURRENT_DATE)
+          AND t.status IN ('SUCCESS', 'PROCESS')
+          AND date_trunc('month', t.date) = date_trunc('month', CURRENT_DATE)
       `),
 
             // 2. Stock Card: Ready Stock
@@ -58,6 +59,7 @@ const getDashboardData = async (req, res) => {
         JOIN drone_models dm ON d.model_id = dm.id
         WHERE ti.item_type = 'Drone' 
           AND t.type = 'SALE'
+          AND t.status IN ('SUCCESS', 'PROCESS')
           AND t.date >= CURRENT_DATE - INTERVAL '30 days'
         GROUP BY dm.model_name
         ORDER BY qty_sold DESC
@@ -73,6 +75,7 @@ const getDashboardData = async (req, res) => {
             SUM(total_amount - total_cogs)::numeric as profit
           FROM transactions
           WHERE type = 'SALE'
+            AND status IN ('SUCCESS', 'PROCESS')
             AND date >= date_trunc('month', CURRENT_DATE - INTERVAL '5 months')
           GROUP BY 1
         )
@@ -106,6 +109,7 @@ const getDashboardData = async (req, res) => {
           JOIN drone_models dm ON d.model_id = dm.id
           WHERE ti.item_type = 'Drone'
             AND t.type = 'SALE'
+            AND t.status IN ('SUCCESS', 'PROCESS')
             AND t.date >= CURRENT_DATE - INTERVAL '60 days'
           GROUP BY dm.id
         )
@@ -140,7 +144,7 @@ const getDashboardData = async (req, res) => {
           JOIN transactions t ON ti.transaction_id = t.id
           JOIN drones d ON ti.item_id = d.id
           JOIN drone_models dm ON d.model_id = dm.id
-          WHERE ti.item_type = 'Drone' AND t.type = 'SALE'
+          WHERE ti.item_type = 'Drone' AND t.type = 'SALE' AND t.status IN ('SUCCESS', 'PROCESS')
           GROUP BY dm.id
         )
         SELECT 
@@ -189,6 +193,7 @@ const getDashboardData = async (req, res) => {
             ELSE 0
           END), 0)::numeric AS savings_debt
         FROM transactions
+        WHERE status IN ('SUCCESS', 'PROCESS')
       `),
 
             // 12. Market Insights (urutkan berdasarkan margin terbesar)

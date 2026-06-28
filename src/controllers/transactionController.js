@@ -2,7 +2,7 @@ const db = require('../config/db');
 
 // POST /transactions/sale
 const createSale = async (req, res) => {
-    const { date, total_price, notes, items, platform } = req.body;
+    const { date, total_price, notes, items, platform, status } = req.body;
     const client = await db.pool.connect();
 
     try {
@@ -69,12 +69,13 @@ const createSale = async (req, res) => {
 
         // 3. Buat Record Transaksi Induk (The Snapshot)
         const trxDate = date ? date : new Date();
+        const trxStatus = status || 'SUCCESS';
         const insertTrxQuery = `
-      INSERT INTO transactions (type, date, total_amount, total_cogs, notes, platform)
-      VALUES ('SALE', $1, $2, $3, $4, $5)
+      INSERT INTO transactions (type, date, total_amount, total_cogs, notes, platform, status)
+      VALUES ('SALE', $1, $2, $3, $4, $5, $6)
       RETURNING id;
     `;
-        const trxRes = await client.query(insertTrxQuery, [trxDate, total_price, totalCogs, notes, platform]);
+        const trxRes = await client.query(insertTrxQuery, [trxDate, total_price, totalCogs, notes, platform, trxStatus]);
         const transactionId = trxRes.rows[0].id;
 
         // 4. Masukkan Detail Transaksi (transaction_items)
@@ -135,7 +136,7 @@ const getTransactions = async (req, res) => {
                 t.notes,
                 t.platform,
                 t.type,
-                'Success' as status -- Berdasarkan contoh respons, status tampaknya hardcoded Success atau bisa diambil dari data jika ada
+                t.status as status
             FROM transactions t
             WHERE 1=1
         `;
@@ -151,6 +152,11 @@ const getTransactions = async (req, res) => {
         if (platform) {
             query += ` AND t.platform = $${paramCount++}`;
             params.push(platform);
+        }
+
+        if (status) {
+            query += ` AND t.status = $${paramCount++}`;
+            params.push(status);
         }
 
         if (month) {
@@ -203,6 +209,7 @@ const getTransactions = async (req, res) => {
             FROM (
                 ${query.split('ORDER BY')[0]}
             ) t
+            WHERE t.status IN ('SUCCESS', 'PROCESS')
         `;
 
         const summaryRes = await db.query(summaryQuery, params);
@@ -223,6 +230,71 @@ const getTransactions = async (req, res) => {
     }
 };
 
+// PATCH /api/v1/transactions/:id/status
+const updateTransactionStatus = async (req, res) => {
+    const { id } = req.params;
+    const { status } = req.body;
+    const client = await db.pool.connect();
+
+    const allowedStatuses = ['SUCCESS', 'PROCESS', 'RETURN'];
+    if (!allowedStatuses.includes(status)) {
+        return res.status(400).json({ message: "Status tidak valid. Harus berupa SUCCESS, PROCESS, atau RETURN" });
+    }
+
+    try {
+        await client.query('BEGIN');
+
+        // 1. Cek transaksi saat ini
+        const trxQuery = await client.query('SELECT status, type FROM transactions WHERE id = $1', [id]);
+        if (trxQuery.rowCount === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ message: "Transaksi tidak ditemukan" });
+        }
+
+        const currentStatus = trxQuery.rows[0].status;
+        const trxType = trxQuery.rows[0].type;
+
+        if (currentStatus === status) {
+            await client.query('ROLLBACK');
+            return res.status(200).json({ message: "Status sudah sama, tidak ada perubahan" });
+        }
+
+        // 2. Ambil item-item dalam transaksi
+        const itemsRes = await client.query('SELECT item_id, item_type FROM transaction_items WHERE transaction_id = $1', [id]);
+
+        // 3. Update status item (Drones / Accessories) berdasarkan perubahan status
+        let itemStatusToUpdate = null;
+
+        if (status === 'RETURN' && currentStatus !== 'RETURN') {
+            // Jika penjualan diretur, barang kembali 'Ready'. Jika pembelian diretur, barang jadi 'Returned'
+            itemStatusToUpdate = trxType === 'SALE' ? 'Ready' : 'Returned';
+        } else if ((status === 'SUCCESS' || status === 'PROCESS') && currentStatus === 'RETURN') {
+            // Jika batal retur, kembalikan ke status asalnya (jika SALE jadi Sold, jika PURCHASE jadi Ready)
+            itemStatusToUpdate = trxType === 'SALE' ? 'Sold' : 'Ready';
+        }
+
+        if (itemStatusToUpdate) {
+            for (const item of itemsRes.rows) {
+                const tableName = item.item_type === 'Drone' ? 'drones' : 'accessory_items';
+                await client.query(`UPDATE ${tableName} SET status = $1 WHERE id = $2`, [itemStatusToUpdate, item.item_id]);
+            }
+        }
+
+        // 4. Update status transaksi
+        await client.query('UPDATE transactions SET status = $1 WHERE id = $2', [status, id]);
+
+        await client.query('COMMIT');
+        res.json({ message: `Status transaksi berhasil diubah menjadi ${status}` });
+
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error("Update Transaction Status Error:", err);
+        res.status(500).json({ error: err.message });
+    } finally {
+        client.release();
+    }
+};
+
 // GET /api/v1/transactions/:id
 const getTransactionDetails = async (req, res) => {
     try {
@@ -232,7 +304,7 @@ const getTransactionDetails = async (req, res) => {
         const trxQuery = `
             SELECT 
                 t.id, t.date::text as date, t.total_amount, t.total_cogs, 
-                t.notes, t.platform, t.type
+                t.notes, t.platform, t.type, t.status
             FROM transactions t
             WHERE t.id = $1
         `;
@@ -267,12 +339,12 @@ const getTransactionDetails = async (req, res) => {
             LEFT JOIN accessories acc ON ai.accessory_id = acc.id
             WHERE ti.transaction_id = $1
         `;
-        
+
         const itemsRes = await db.query(itemsQuery, [id]);
-        
+
         // Format the response
         transaction.items = itemsRes.rows;
-        
+
         // Calculate total profit
         transaction.total_profit = parseFloat(transaction.total_amount) - parseFloat(transaction.total_cogs);
 
@@ -295,28 +367,43 @@ const deleteTransaction = async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        // 1. Get all transaction items
-        const itemsRes = await client.query('SELECT item_id, item_type FROM transaction_items WHERE transaction_id = $1', [id]);
-        
-        // 2. Restore status of each item to 'Ready'
-        for (const item of itemsRes.rows) {
-            const tableName = item.item_type === 'Drone' ? 'drones' : 'accessory_items';
-            await client.query(`UPDATE ${tableName} SET status = 'Ready' WHERE id = $1`, [item.item_id]);
-        }
-
-        // 3. Delete from transaction_items
-        await client.query('DELETE FROM transaction_items WHERE transaction_id = $1', [id]);
-
-        // 4. Delete the transaction itself
-        const delRes = await client.query('DELETE FROM transactions WHERE id = $1 RETURNING id', [id]);
-        
-        if (delRes.rowCount === 0) {
+        // 1. Get transaction info
+        const trxQuery = await client.query('SELECT type FROM transactions WHERE id = $1', [id]);
+        if (trxQuery.rowCount === 0) {
             await client.query('ROLLBACK');
             return res.status(404).json({ message: "Transaksi tidak ditemukan" });
         }
+        const trxType = trxQuery.rows[0].type;
+
+        // 2. Get all transaction items
+        const itemsRes = await client.query('SELECT item_id, item_type FROM transaction_items WHERE transaction_id = $1', [id]);
+
+        // 3. Process items based on transaction type
+        for (const item of itemsRes.rows) {
+            const tableName = item.item_type === 'Drone' ? 'drones' : 'accessory_items';
+            
+            if (trxType === 'SALE') {
+                // Return stock to 'Ready'
+                await client.query(`UPDATE ${tableName} SET status = 'Ready' WHERE id = $1`, [item.item_id]);
+            } else if (trxType === 'PURCHASE') {
+                // Delete stock entirely
+                await client.query(`DELETE FROM ${tableName} WHERE id = $1`, [item.item_id]);
+            }
+        }
+
+        // 4. Delete from transaction_items
+        await client.query('DELETE FROM transaction_items WHERE transaction_id = $1', [id]);
+
+        // 5. Delete the transaction itself
+        await client.query('DELETE FROM transactions WHERE id = $1', [id]);
 
         await client.query('COMMIT');
-        res.json({ message: "Transaksi berhasil dihapus dan status barang telah dikembalikan menjadi Ready" });
+        
+        const message = trxType === 'SALE' 
+            ? "Transaksi penjualan berhasil dihapus dan status barang telah dikembalikan menjadi Ready"
+            : "Transaksi pembelian berhasil dihapus beserta data barang yang dibeli";
+            
+        res.json({ message });
 
     } catch (err) {
         await client.query('ROLLBACK');
@@ -327,4 +414,4 @@ const deleteTransaction = async (req, res) => {
     }
 };
 
-module.exports = { createSale, getTransactions, getTransactionDetails, deleteTransaction };
+module.exports = { createSale, getTransactions, getTransactionDetails, updateTransactionStatus, deleteTransaction };
