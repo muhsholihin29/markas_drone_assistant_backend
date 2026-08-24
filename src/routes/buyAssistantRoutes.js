@@ -28,4 +28,7 @@ router.delete('/:id', buyAssistantController.deleteBuyAssistant);
 // Query params opsional: ?status=Pending&type=Drone
 router.get('/recommendations', buyAssistantController.getRecommendations);
 
+// GET /api/v1/buy-assistant/:id — Detail item Buy Assistant
+router.get('/:id', buyAssistantController.getBuyAssistantDetail);
+
 module.exports = router;

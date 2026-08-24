@@ -56,15 +56,17 @@ const createBuyAssistant = async function (req, res) {
         const link = req.body.link || null;
         const price = parseFloat(req.body.price) || 0;
         const status = req.body.status || 'Active';
+        const title = req.body.title || null;
+        const description = req.body.description || null;
         const condition = req.body.condition || null;
         const condition_score = req.body.condition_score ? parseInt(req.body.condition_score) : null;
         const notes = req.body.notes || null;
 
         // A. INSERT ke market_items (tabel induk)
         const marketItemRes = await client.query(
-            'INSERT INTO market_items (item_type, source_platform, link, price, status) ' +
-            'VALUES ($1, $2, $3, $4, $5) RETURNING id',
-            [type, source_platform, link, price, status]
+            'INSERT INTO market_items (item_type, source_platform, link, price, status, title, description) ' +
+            'VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
+            [type, source_platform, link, price, status, title, description]
         );
 
         const marketItemId = marketItemRes.rows[0].id;
@@ -184,114 +186,203 @@ const createBuyAssistant = async function (req, res) {
     }
 };
 
-// ... existing code ...
+/**
+ * Helper untuk format row Buy Assistant menjadi response object konsisten
+ */
+function formatBuyAssistantRow(row) {
+    let imageUrls = [];
+    if (row.images) {
+        if (typeof row.images === 'string') {
+            try {
+                const parsed = JSON.parse(row.images);
+                if (Array.isArray(parsed)) {
+                    imageUrls = parsed;
+                } else if (parsed) {
+                    imageUrls = [parsed];
+                }
+            } catch (e) {
+                imageUrls = [row.images];
+            }
+        } else if (Array.isArray(row.images)) {
+            imageUrls = row.images;
+        } else if (typeof row.images === 'object' && row.images !== null) {
+            imageUrls = Object.values(row.images);
+        }
+    }
+
+    imageUrls = imageUrls
+        .map(item => {
+            if (typeof item === 'string') return item;
+            if (item && typeof item === 'object' && item.url) return item.url;
+            return item ? String(item) : null;
+        })
+        .filter(url => typeof url === 'string' && url.trim().length > 0);
+
+    return {
+        id: row.id,
+        type: row.type,
+        source_platform: row.source_platform || null,
+        link: row.link || null,
+        price: row.price || 0,
+        status: row.status || null,
+        title: row.title || null,
+        description: row.description || null,
+        drone_model_id: row.drone_model_id || null,
+        model_name: row.model_name || null,
+        sub_model_id: row.sub_model_id === null || row.sub_model_id === undefined ? null : Number(row.sub_model_id),
+        sub_model_name: row.sub_model_name || null,
+        drone_name: row.sub_model_name || row.model_name || row.title || null,
+        completeness: row.completeness || null,
+        location: row.location || null,
+        seller_reputation: row.seller_reputation || null,
+        accessory_id: row.accessory_id || null,
+        accessory_name: row.accessory_name || row.title || null,
+        condition: row.condition || null,
+        condition_score: row.condition_score || null,
+        notes: row.notes || null,
+        fair_price: row.fair_price || null,
+        price_score: row.price_score || null,
+        analysis_condition_score: row.analysis_condition_score || null,
+        completeness_score: row.completeness_score || null,
+        profit_prediction: row.profit_prediction || null,
+        buy_recommendation: row.buy_recommendation || null,
+        image_urls: imageUrls,
+        created_at: row.created_at || null
+    };
+}
+
+/**
+ * Base query SQL untuk mengambil data Buy Assistant (Drone & Accessory)
+ */
+const BUY_ASSISTANT_BASE_QUERY = `
+    SELECT
+        mi.id,
+        mi.item_type                          AS type,
+        mi.source_platform                    AS source_platform,
+        mi.link,
+        mi.price::float,
+        mi.status,
+        mi.title,
+        mi.description,
+        mi.created_at,
+
+        md.drone_model_id                     AS drone_model_id,
+        dm.model_name                         AS model_name,
+        md.sub_model_id::int                  AS sub_model_id,
+        dsm.name                              AS sub_model_name,
+        md.completeness,
+        md.location,
+        md.seller_reputation                  AS seller_reputation,
+        md.condition,
+        md.condition_score                    AS condition_score,
+        md.notes,
+        md.images,
+
+        NULL::int                             AS accessory_id,
+        NULL::varchar                         AS accessory_name,
+
+        ma.fair_price::float                  AS fair_price,
+        ma.price_score                        AS price_score,
+        ma.condition_score                    AS analysis_condition_score,
+        ma.completeness_score                 AS completeness_score,
+        ma.profit_prediction::float           AS profit_prediction,
+        ma.buy_recommendation                 AS buy_recommendation
+
+    FROM market_items mi
+    JOIN market_drones md ON md.id = mi.id
+    LEFT JOIN drone_models dm ON dm.id = md.drone_model_id
+    LEFT JOIN drone_sub_models dsm ON dsm.id = md.sub_model_id
+    LEFT JOIN market_analysis ma ON ma.market_item_id = mi.id
+    WHERE mi.item_type = 'Drone'
+
+    UNION ALL
+
+    SELECT
+        mi.id,
+        mi.item_type                          AS type,
+        mi.source_platform                    AS source_platform,
+        mi.link,
+        mi.price::float,
+        mi.status,
+        mi.title,
+        mi.description,
+        mi.created_at,
+
+        NULL::int                             AS drone_model_id,
+        NULL::varchar                         AS model_name,
+        NULL::int                             AS sub_model_id,
+        NULL::varchar                         AS sub_model_name,
+        NULL::varchar                         AS completeness,
+        NULL::varchar                         AS location,
+        NULL::varchar                         AS seller_reputation,
+        mac.condition,
+        mac.condition_score                   AS condition_score,
+        mac.notes,
+        (SELECT json_agg(image_url) FROM item_images WHERE item_type = 'MarketAccessory' AND item_id = mi.id)::jsonb AS images,
+
+        mac.accessory_id                      AS accessory_id,
+        a.name                                AS accessory_name,
+
+        ma.fair_price::float                  AS fair_price,
+        ma.price_score                        AS price_score,
+        ma.condition_score                    AS analysis_condition_score,
+        ma.completeness_score                 AS completeness_score,
+        ma.profit_prediction::float           AS profit_prediction,
+        ma.buy_recommendation                 AS buy_recommendation
+
+    FROM market_items mi
+    JOIN market_accessories mac ON mac.id = mi.id
+    LEFT JOIN accessories a ON a.id = mac.accessory_id
+    LEFT JOIN market_analysis ma ON ma.market_item_id = mi.id
+    WHERE mi.item_type = 'Accessory'
+`;
 
 /**
  * GET /api/v1/buy-assistant/recommendations
  *
  * Query Params (opsional):
- *   status   - Pending / Bought / Skipped
- *   type     - Drone / Accessory
+ *   status     - Active / Watchlist / Bought / Skipped / Sold
+ *   type       - Drone / Accessory
+ *   start_date - YYYY-MM-DD or ISO string
+ *   end_date   - YYYY-MM-DD or ISO string
  */
 const getRecommendations = async function (req, res) {
     try {
         const statusFilter = req.query.status || null;
         const typeFilter = req.query.type || null;
-
-        const query = `
-            SELECT
-                mi.id,
-                mi.item_type                          AS type,
-                mi.source_platform                    AS source_platform,
-                mi.link,
-                mi.price::float,
-                mi.status,
-                mi.created_at,
-
-                md.drone_model_id                     AS drone_model_id,
-                md.sub_model_id::int                  AS sub_model_id,
-                dsm.name                              AS sub_model_name,
-                md.completeness,
-                md.location,
-                md.seller_reputation                  AS seller_reputation,
-                md.condition,
-                md.condition_score                    AS condition_score,
-                md.notes,
-                md.images,
-
-                NULL::int                             AS accessory_id,
-                NULL::varchar                         AS accessory_name,
-
-                ma.fair_price::float                  AS fair_price,
-                ma.price_score                        AS price_score,
-                ma.condition_score                    AS analysis_condition_score,
-                ma.completeness_score                 AS completeness_score,
-                ma.profit_prediction::float           AS profit_prediction,
-                ma.buy_recommendation                 AS buy_recommendation
-
-            FROM market_items mi
-            JOIN market_drones md ON md.id = mi.id
-            LEFT JOIN drone_sub_models dsm ON dsm.id = md.sub_model_id
-            LEFT JOIN market_analysis ma ON ma.market_item_id = mi.id
-            WHERE mi.item_type = 'Drone'
-
-            UNION ALL
-
-            SELECT
-                mi.id,
-                mi.item_type                          AS type,
-                mi.source_platform                    AS source_platform,
-                mi.link,
-                mi.price::float,
-                mi.status,
-                mi.created_at,
-
-                NULL::int                             AS drone_model_id,
-                NULL::int                             AS sub_model_id,
-                NULL::varchar                         AS sub_model_name,
-                NULL::varchar                         AS completeness,
-                NULL::varchar                         AS location,
-                NULL::varchar                         AS seller_reputation,
-                mac.condition,
-                mac.condition_score                   AS condition_score,
-                mac.notes,
-                NULL::jsonb                           AS images,
-
-                mac.accessory_id                      AS accessory_id,
-                a.name                                AS accessory_name,
-
-                ma.fair_price::float                  AS fair_price,
-                ma.price_score                        AS price_score,
-                ma.condition_score                    AS analysis_condition_score,
-                ma.completeness_score                 AS completeness_score,
-                ma.profit_prediction::float           AS profit_prediction,
-                ma.buy_recommendation                 AS buy_recommendation
-
-            FROM market_items mi
-            JOIN market_accessories mac ON mac.id = mi.id
-            LEFT JOIN accessories a ON a.id = mac.accessory_id
-            LEFT JOIN market_analysis ma ON ma.market_item_id = mi.id
-            WHERE mi.item_type = 'Accessory'
-        `;
+        const startDateFilter = req.query.start_date || null;
+        const endDateFilter = req.query.end_date || null;
 
         // Filter dinamis (wrap UNION sebagai subquery)
         const conditions = [];
         const params = [];
         let paramIndex = 1;
 
-        if (statusFilter) {
+        if (statusFilter && statusFilter !== 'All' && statusFilter !== 'Semua') {
             conditions.push('status = $' + paramIndex);
             params.push(statusFilter);
             paramIndex++;
         }
 
-        if (typeFilter) {
+        if (typeFilter && typeFilter !== 'All' && typeFilter !== 'Semua') {
             conditions.push('type = $' + paramIndex);
             params.push(typeFilter);
             paramIndex++;
         }
 
-        let fullQuery = 'SELECT * FROM (' + query + ') AS combined';
+        if (startDateFilter) {
+            conditions.push('created_at >= $' + paramIndex);
+            params.push(startDateFilter);
+            paramIndex++;
+        }
+
+        if (endDateFilter) {
+            conditions.push('created_at <= $' + paramIndex);
+            params.push(endDateFilter);
+            paramIndex++;
+        }
+
+        let fullQuery = 'SELECT * FROM (' + BUY_ASSISTANT_BASE_QUERY + ') AS combined';
 
         if (conditions.length > 0) {
             fullQuery += ' WHERE ' + conditions.join(' AND ');
@@ -300,52 +391,36 @@ const getRecommendations = async function (req, res) {
         fullQuery += ' ORDER BY created_at DESC';
 
         const result = await db.query(fullQuery, params);
-
-        // Format response sesuai model Flutter (flat, snake_case)
-        const rows = result.rows.map(function (row) {
-            // Parse images JSONB → array of string
-            let imageUrls = [];
-            if (row.images) {
-                if (typeof row.images === 'string') {
-                    try { imageUrls = JSON.parse(row.images); } catch (e) { imageUrls = []; }
-                } else if (Array.isArray(row.images)) {
-                    imageUrls = row.images;
-                }
-            }
-
-            return {
-                id: row.id,
-                type: row.type,
-                source_platform: row.source_platform || null,
-                link: row.link || null,
-                price: row.price || 0,
-                status: row.status || null,
-                drone_model_id: row.drone_model_id || null,
-                sub_model_id: row.sub_model_id === null || row.sub_model_id === undefined ? null : Number(row.sub_model_id),
-                drone_name: row.sub_model_name || null,
-                completeness: row.completeness || null,
-                location: row.location || null,
-                seller_reputation: row.seller_reputation || null,
-                accessory_id: row.accessory_id || null,
-                accessory_name: row.accessory_name || null,
-                condition: row.condition || null,
-                condition_score: row.condition_score || null,
-                notes: row.notes || null,
-                fair_price: row.fair_price || null,
-                price_score: row.price_score || null,
-                analysis_condition_score: row.analysis_condition_score || null,
-                completeness_score: row.completeness_score || null,
-                profit_prediction: row.profit_prediction || null,
-                buy_recommendation: row.buy_recommendation || null,
-                image_urls: imageUrls,
-                created_at: row.created_at || null
-            };
-        });
+        const rows = result.rows.map(formatBuyAssistantRow);
 
         res.status(200).json(rows);
 
     } catch (err) {
         console.error("Get Recommendations Error:", err);
+        res.status(500).json({ error: err.message });
+    }
+};
+
+/**
+ * GET /api/v1/buy-assistant/:id
+ * Get detail satu item Buy Assistant
+ */
+const getBuyAssistantDetail = async function (req, res) {
+    try {
+        const marketItemId = req.params.id;
+
+        const query = 'SELECT * FROM (' + BUY_ASSISTANT_BASE_QUERY + ') AS combined WHERE id = $1';
+        const result = await db.query(query, [marketItemId]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Buy Assistant item not found' });
+        }
+
+        const formatted = formatBuyAssistantRow(result.rows[0]);
+        res.status(200).json(formatted);
+
+    } catch (err) {
+        console.error("Get Buy Assistant Detail Error:", err);
         res.status(500).json({ error: err.message });
     }
 };
@@ -375,6 +450,8 @@ const updateBuyAssistant = async function (req, res) {
         const link = req.body.link || null;
         const price = req.body.price !== undefined ? (parseFloat(req.body.price) || 0) : null;
         const status = req.body.status || null;
+        const title = req.body.title !== undefined ? req.body.title : null;
+        const description = req.body.description !== undefined ? req.body.description : null;
 
         const existingMarketItemRes = await client.query(
             'SELECT source_platform, link, price, status FROM market_items WHERE id = $1',
@@ -390,9 +467,11 @@ const updateBuyAssistant = async function (req, res) {
                  link = COALESCE($3, link),
                  price = COALESCE($4, price),
                  status = COALESCE($5, status),
+                 title = COALESCE($6, title),
+                 description = COALESCE($7, description),
                  updated_at = NOW()
-             WHERE id = $6`,
-            [newType, source_platform, link, price, status, marketItemId]
+             WHERE id = $8`,
+            [newType, source_platform, link, price, status, title, description, marketItemId]
         );
 
         if (currentType === 'Drone' && newType === 'Drone') {
@@ -739,6 +818,7 @@ const deleteBuyAssistant = async function (req, res) {
 module.exports = {
     createBuyAssistant: createBuyAssistant,
     getRecommendations: getRecommendations,
+    getBuyAssistantDetail: getBuyAssistantDetail,
     updateBuyAssistant: updateBuyAssistant,
     deleteBuyAssistant: deleteBuyAssistant
 };
