@@ -507,8 +507,6 @@ const updateBuyAssistant = async function (req, res) {
                     imageUrls.push(imageUrl);
                 }
                 finalImages = JSON.stringify(imageUrls);
-            } else if (oldImagesRes.rows.length > 0) {
-                finalImages = oldImagesRes.rows[0].images;
             }
 
             const existingDroneRes = await client.query(
