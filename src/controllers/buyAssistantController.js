@@ -359,9 +359,19 @@ const getRecommendations = async function (req, res) {
         let paramIndex = 1;
 
         if (statusFilter && statusFilter !== 'All' && statusFilter !== 'Semua') {
-            conditions.push('status = $' + paramIndex);
-            params.push(statusFilter);
-            paramIndex++;
+            const statuses = Array.isArray(statusFilter)
+                ? statusFilter
+                : String(statusFilter).split(',').map(s => s.trim()).filter(Boolean);
+
+            if (statuses.length === 1) {
+                conditions.push('status = $' + paramIndex);
+                params.push(statuses[0]);
+                paramIndex++;
+            } else if (statuses.length > 1) {
+                conditions.push('status = ANY($' + paramIndex + ')');
+                params.push(statuses);
+                paramIndex++;
+            }
         }
 
         if (typeFilter && typeFilter !== 'All' && typeFilter !== 'Semua') {
