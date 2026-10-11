@@ -373,6 +373,7 @@ const getRecommendations = async function (req, res) {
     try {
         const statusFilter = req.query.status || null;
         const typeFilter = req.query.type || null;
+        const recommendationFilter = req.query.recommendation || req.query.buy_recommendation || null;
         const startDateFilter = req.query.start_date || null;
         const endDateFilter = req.query.end_date || null;
 
@@ -393,6 +394,22 @@ const getRecommendations = async function (req, res) {
             } else if (statuses.length > 1) {
                 conditions.push('status = ANY($' + paramIndex + ')');
                 params.push(statuses);
+                paramIndex++;
+            }
+        }
+
+        if (recommendationFilter && recommendationFilter !== 'All' && recommendationFilter !== 'Semua') {
+            const recs = Array.isArray(recommendationFilter)
+                ? recommendationFilter
+                : String(recommendationFilter).split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+
+            if (recs.length === 1) {
+                conditions.push('UPPER(buy_recommendation) = $' + paramIndex);
+                params.push(recs[0]);
+                paramIndex++;
+            } else if (recs.length > 1) {
+                conditions.push('UPPER(buy_recommendation) = ANY($' + paramIndex + ')');
+                params.push(recs);
                 paramIndex++;
             }
         }
