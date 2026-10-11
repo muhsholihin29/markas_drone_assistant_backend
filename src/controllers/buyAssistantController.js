@@ -247,7 +247,10 @@ function formatBuyAssistantRow(row) {
         profit_prediction: row.profit_prediction || null,
         buy_recommendation: row.buy_recommendation || null,
         image_urls: imageUrls,
-        created_at: row.created_at || null
+        created_at: row.created_at || null,
+        author_id: row.author_id || null,
+        author_name: row.author_name || null,
+        author_url: row.author_url || null
     };
 }
 
@@ -265,6 +268,9 @@ const BUY_ASSISTANT_BASE_QUERY = `
         mi.title,
         mi.description,
         mi.created_at,
+        COALESCE(mi.author_id, fp.author_id)  AS author_id,
+        fp.author_name                        AS author_name,
+        fp.author_url                         AS author_url,
 
         md.drone_model_id                     AS drone_model_id,
         dm.model_name                         AS model_name,
@@ -293,7 +299,14 @@ const BUY_ASSISTANT_BASE_QUERY = `
     LEFT JOIN drone_models dm ON dm.id = md.drone_model_id
     LEFT JOIN drone_sub_models dsm ON dsm.id = md.sub_model_id
     LEFT JOIN market_analysis ma ON ma.market_item_id = mi.id
+    LEFT JOIN facebook_posts fp ON fp.post_url = mi.link
     WHERE mi.item_type = 'Drone'
+      AND NOT EXISTS (
+          SELECT 1 FROM blocked_users bu
+          WHERE bu.is_active = true
+            AND bu.user_id = COALESCE(mi.author_id, fp.author_id)
+            AND LOWER(bu.platform) = LOWER(CASE WHEN mi.source_platform ILIKE '%facebook%' THEN 'facebook' ELSE mi.source_platform END)
+      )
 
     UNION ALL
 
@@ -307,6 +320,9 @@ const BUY_ASSISTANT_BASE_QUERY = `
         mi.title,
         mi.description,
         mi.created_at,
+        COALESCE(mi.author_id, fp.author_id)  AS author_id,
+        fp.author_name                        AS author_name,
+        fp.author_url                         AS author_url,
 
         NULL::int                             AS drone_model_id,
         NULL::varchar                         AS model_name,
@@ -334,7 +350,14 @@ const BUY_ASSISTANT_BASE_QUERY = `
     JOIN market_accessories mac ON mac.id = mi.id
     LEFT JOIN accessories a ON a.id = mac.accessory_id
     LEFT JOIN market_analysis ma ON ma.market_item_id = mi.id
+    LEFT JOIN facebook_posts fp ON fp.post_url = mi.link
     WHERE mi.item_type = 'Accessory'
+      AND NOT EXISTS (
+          SELECT 1 FROM blocked_users bu
+          WHERE bu.is_active = true
+            AND bu.user_id = COALESCE(mi.author_id, fp.author_id)
+            AND LOWER(bu.platform) = LOWER(CASE WHEN mi.source_platform ILIKE '%facebook%' THEN 'facebook' ELSE mi.source_platform END)
+      )
 `;
 
 /**
@@ -823,10 +846,158 @@ const deleteBuyAssistant = async function (req, res) {
     }
 };
 
+/**
+ * POST /api/v1/buy-assistant/block-user
+ * Memblokir seller/user dan memindahkan listingnya ke 'Skipped'
+ */
+const blockUser = async function (req, res) {
+    const {
+        market_item_id,
+        user_id,
+        user_name,
+        platform = 'facebook',
+        profile_url,
+        reason
+    } = req.body;
+
+    if (!user_id) {
+        return res.status(400).json({ error: 'user_id wajib diisi untuk memblokir user' });
+    }
+
+    const normalizedPlatform = (platform || 'facebook').toLowerCase();
+    const client = await db.pool.connect();
+
+    try {
+        await client.query('BEGIN');
+
+        // 1. Upsert into blocked_users
+        const blockResult = await client.query(
+            `INSERT INTO blocked_users (user_id, user_name, platform, profile_url, reason, is_active, updated_at)
+             VALUES ($1, $2, $3, $4, $5, true, NOW())
+             ON CONFLICT (platform, user_id)
+             DO UPDATE SET
+                 user_name = COALESCE(EXCLUDED.user_name, blocked_users.user_name),
+                 profile_url = COALESCE(EXCLUDED.profile_url, blocked_users.profile_url),
+                 reason = COALESCE(EXCLUDED.reason, blocked_users.reason),
+                 is_active = true,
+                 updated_at = NOW()
+             RETURNING *`,
+            [
+                String(user_id).trim(),
+                user_name ? String(user_name).trim() : null,
+                normalizedPlatform,
+                profile_url ? String(profile_url).trim() : null,
+                reason ? String(reason).trim() : null
+            ]
+        );
+
+        const blockedUser = blockResult.rows[0];
+
+        // 2. Jika market_item_id disertakan, pastikan author_id terisi jika sebelumnya null, dan set status ke 'Skipped'
+        if (market_item_id) {
+            await client.query(
+                `UPDATE market_items
+                 SET status = 'Skipped',
+                     author_id = COALESCE(author_id, $1),
+                     updated_at = NOW()
+                 WHERE id = $2`,
+                [String(user_id).trim(), market_item_id]
+            );
+        }
+
+        // 3. Update semua listing lain dari author_id ini menjadi 'Skipped'
+        await client.query(
+            `UPDATE market_items
+             SET status = 'Skipped',
+                 updated_at = NOW()
+             WHERE author_id = $1 AND status != 'Skipped'`,
+            [String(user_id).trim()]
+        );
+
+        // 4. Update listing yang terhubung lewat facebook_posts jika ada
+        await client.query(
+            `UPDATE market_items mi
+             SET status = 'Skipped',
+                 author_id = COALESCE(mi.author_id, $1),
+                 updated_at = NOW()
+             FROM facebook_posts fp
+             WHERE mi.link = fp.post_url
+               AND fp.author_id = $1
+               AND mi.status != 'Skipped'`,
+            [String(user_id).trim()]
+        );
+
+        await client.query('COMMIT');
+
+        res.status(200).json({
+            message: `User ${blockedUser.user_name || blockedUser.user_id} berhasil diblokir`,
+            data: blockedUser
+        });
+
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('Block User Error:', err);
+        res.status(500).json({ error: err.message });
+    } finally {
+        client.release();
+    }
+};
+
+/**
+ * GET /api/v1/buy-assistant/blocked-users
+ * Mengambil daftar user yang sedang diblokir
+ */
+const getBlockedUsers = async function (req, res) {
+    try {
+        const result = await db.query(
+            `SELECT id, user_id, user_name, platform, profile_url, reason, is_active, created_at, updated_at
+             FROM blocked_users
+             WHERE is_active = true
+             ORDER BY updated_at DESC`
+        );
+        res.status(200).json(result.rows);
+    } catch (err) {
+        console.error('Get Blocked Users Error:', err);
+        res.status(500).json({ error: err.message });
+    }
+};
+
+/**
+ * POST /api/v1/buy-assistant/unblock-user/:id or DELETE /api/v1/buy-assistant/blocked-users/:id
+ * Membuka blokir user
+ */
+const unblockUser = async function (req, res) {
+    const id = req.params.id;
+    try {
+        const result = await db.query(
+            `UPDATE blocked_users
+             SET is_active = false, updated_at = NOW()
+             WHERE id = $1 OR user_id = $1
+             RETURNING *`,
+            [id]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Data blocked user tidak ditemukan' });
+        }
+
+        res.status(200).json({
+            message: 'User berhasil di-unblock',
+            data: result.rows[0]
+        });
+    } catch (err) {
+        console.error('Unblock User Error:', err);
+        res.status(500).json({ error: err.message });
+    }
+};
+
 module.exports = {
     createBuyAssistant: createBuyAssistant,
     getRecommendations: getRecommendations,
     getBuyAssistantDetail: getBuyAssistantDetail,
     updateBuyAssistant: updateBuyAssistant,
-    deleteBuyAssistant: deleteBuyAssistant
+    deleteBuyAssistant: deleteBuyAssistant,
+    blockUser: blockUser,
+    getBlockedUsers: getBlockedUsers,
+    unblockUser: unblockUser
 };

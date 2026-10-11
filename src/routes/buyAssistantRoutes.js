@@ -28,6 +28,18 @@ router.delete('/:id', buyAssistantController.deleteBuyAssistant);
 // Query params opsional: ?status=Pending&type=Drone
 router.get('/recommendations', buyAssistantController.getRecommendations);
 
+// POST /api/v1/buy-assistant/block-user — Blokir user/penjual
+router.post('/block-user', buyAssistantController.blockUser);
+
+// GET /api/v1/buy-assistant/blocked-users — Daftar user yang diblokir
+router.get('/blocked-users', buyAssistantController.getBlockedUsers);
+
+// POST /api/v1/buy-assistant/unblock-user/:id — Buka blokir user
+router.post('/unblock-user/:id', buyAssistantController.unblockUser);
+
+// DELETE /api/v1/buy-assistant/blocked-users/:id — Buka blokir user (RESTful alternate)
+router.delete('/blocked-users/:id', buyAssistantController.unblockUser);
+
 // GET /api/v1/buy-assistant/:id — Detail item Buy Assistant
 router.get('/:id', buyAssistantController.getBuyAssistantDetail);
 
