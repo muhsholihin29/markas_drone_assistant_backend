@@ -61,12 +61,13 @@ const createBuyAssistant = async function (req, res) {
         const condition = req.body.condition || null;
         const condition_score = req.body.condition_score ? parseInt(req.body.condition_score) : null;
         const notes = req.body.notes || null;
+        const author_id = req.body.author_id || null;
 
         // A. INSERT ke market_items (tabel induk)
         const marketItemRes = await client.query(
-            'INSERT INTO market_items (item_type, source_platform, link, price, status, title, description) ' +
-            'VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
-            [type, source_platform, link, price, status, title, description]
+            'INSERT INTO market_items (item_type, source_platform, link, price, status, title, description, author_id) ' +
+            'VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id',
+            [type, source_platform, link, price, status, title, description, author_id]
         );
 
         const marketItemId = marketItemRes.rows[0].id;
@@ -502,6 +503,7 @@ const updateBuyAssistant = async function (req, res) {
         const status = req.body.status || null;
         const title = req.body.title !== undefined ? req.body.title : null;
         const description = req.body.description !== undefined ? req.body.description : null;
+        const author_id = req.body.author_id !== undefined ? req.body.author_id : null;
 
         const existingMarketItemRes = await client.query(
             'SELECT source_platform, link, price, status FROM market_items WHERE id = $1',
@@ -519,9 +521,10 @@ const updateBuyAssistant = async function (req, res) {
                  status = COALESCE($5, status),
                  title = COALESCE($6, title),
                  description = COALESCE($7, description),
+                 author_id = COALESCE($8, author_id),
                  updated_at = NOW()
-             WHERE id = $8`,
-            [newType, source_platform, link, price, status, title, description, marketItemId]
+             WHERE id = $9`,
+            [newType, source_platform, link, price, status, title, description, author_id, marketItemId]
         );
 
         if (currentType === 'Drone' && newType === 'Drone') {
