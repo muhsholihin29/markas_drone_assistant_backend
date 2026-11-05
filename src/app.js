@@ -11,6 +11,7 @@ const transactionRoutes = require('./routes/transactionRoutes');
 const buyAssistantRoutes = require('./routes/buyAssistantRoutes');
 const bundlePresetRoutes = require('./routes/bundlePresetRoutes');
 const financialLedgerRoutes = require('./routes/financialLedgerRoutes');
+const aiAssistantRoutes = require('./routes/aiAssistantRoutes');
 const path = require("path");
 
 const app = express();
@@ -78,6 +79,7 @@ app.use('/api/v1/transactions', transactionRoutes);
 app.use('/api/v1/buy-assistant', buyAssistantRoutes);
 app.use('/api/v1/bundle-presets', bundlePresetRoutes);
 app.use('/api/v1/financial-ledger', financialLedgerRoutes);
+app.use('/api/v1/ai-assistant', aiAssistantRoutes);
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // Root Endpoint (Cek server nyala/nggak)
