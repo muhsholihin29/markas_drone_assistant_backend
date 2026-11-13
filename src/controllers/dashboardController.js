@@ -66,26 +66,23 @@ const getDashboardData = async (req, res) => {
         LIMIT 5
       `),
 
-            // 6. Analytics: Average Margin (6 months)
+            // 6. Analytics: Kecepatan Laku per Model (Average Days to Sell)
             db.query(`
-        WITH monthly_data AS (
-          SELECT 
-            date_trunc('month', date) as month_date,
-            SUM(total_amount)::numeric as revenue,
-            SUM(total_amount - total_cogs)::numeric as profit
-          FROM transactions
-          WHERE type = 'SALE'
-            AND status IN ('SUCCESS', 'PROCESS')
-            AND date >= date_trunc('month', CURRENT_DATE - INTERVAL '5 months')
-          GROUP BY 1
-        )
-        SELECT 
-          to_char(month_date, 'Mon') as period,
-          month_date,
-          profit as total_profit,
-          CASE WHEN revenue > 0 THEN (profit / revenue * 100) ELSE 0 END::numeric as margin_percentage
-        FROM monthly_data
-        ORDER BY month_date ASC
+        SELECT
+          dm.model_name,
+          COUNT(ti.id)::int as qty_sold,
+          AVG(GREATEST(0, (t.date::date - COALESCE(d.purchase_date, d.created_at::date))))::numeric(10,1) as avg_days_to_sell
+        FROM transaction_items ti
+        JOIN transactions t ON ti.transaction_id = t.id
+        JOIN drones d ON ti.item_id = d.id
+        JOIN drone_models dm ON d.model_id = dm.id
+        WHERE ti.item_type = 'Drone'
+          AND t.type = 'SALE'
+          AND t.status IN ('SUCCESS', 'PROCESS')
+          AND t.date >= CURRENT_DATE - INTERVAL '90 days'
+        GROUP BY dm.id, dm.model_name
+        ORDER BY avg_days_to_sell ASC, qty_sold DESC
+        LIMIT 5
       `),
 
             // 7. Analytics: Restock Alerts (Fast Moving)
@@ -279,30 +276,27 @@ const getDashboardData = async (req, res) => {
             revenue: parseNum(row.revenue)
         }));
 
-        // 2. Average Margin processing
-        const avgMarginRows = avgMarginResult.rows;
-        let avgMarginTotal = 0;
-        const avgMarginData = avgMarginRows.map(row => {
-            const margin = parseNum(row.margin_percentage);
-            avgMarginTotal += margin;
+        // 2. Kecepatan Laku per Model processing (replacing Margin Trend)
+        const velocityRows = avgMarginResult.rows;
+        const velocityData = velocityRows.map(row => {
+            const avgDays = Number(parseNum(row.avg_days_to_sell).toFixed(1));
+            let badge = 'Normal';
+            if (avgDays <= 7) badge = 'Sangat Cepat';
+            else if (avgDays <= 14) badge = 'Cepat';
             return {
-                period: row.period,
-                margin_percentage: Number(margin.toFixed(1)),
-                total_profit: parseNum(row.total_profit)
+                model_name: row.model_name,
+                qty_sold: parseNum(row.qty_sold),
+                avg_days_to_sell: avgDays,
+                status_badge: badge
             };
         });
-        const overallAvgMargin = avgMarginRows.length > 0 ? (avgMarginTotal / avgMarginRows.length).toFixed(1) : 0;
-        
-        let trendIndicator = { value: "0%", status: "neutral" };
-        if (avgMarginRows.length >= 2) {
-            const currentMonthMargin = parseNum(avgMarginRows[avgMarginRows.length - 1].margin_percentage);
-            const prevMonthMargin = parseNum(avgMarginRows[avgMarginRows.length - 2].margin_percentage);
-            const diff = currentMonthMargin - prevMonthMargin;
-            trendIndicator = {
-                value: `${diff > 0 ? '+' : ''}${diff.toFixed(1)}%`,
-                status: diff > 0 ? 'positive' : (diff < 0 ? 'negative' : 'neutral')
-            };
-        }
+        const overallAvgDays = velocityRows.length > 0
+            ? (velocityRows.reduce((acc, r) => acc + parseNum(r.avg_days_to_sell), 0) / velocityRows.length).toFixed(1)
+            : '0.0';
+        const velocityTrendIndicator = {
+            value: `${overallAvgDays} hari`,
+            status: Number(overallAvgDays) <= 14 ? 'positive' : 'neutral'
+        };
 
         // 3. Restock Alerts processing
         const restockData = restockAlertsResult.rows.map(row => {
@@ -397,12 +391,12 @@ const getDashboardData = async (req, res) => {
                     data: topSellingData
                 },
                 {
-                    card_id: "average_margin",
-                    card_type: "area_chart",
-                    title: "Average Margin",
-                    description: `Avg Profit: ${overallAvgMargin}%`,
-                    trend_indicator: trendIndicator,
-                    data: avgMarginData
+                    card_id: "sales_velocity",
+                    card_type: "list_velocity",
+                    title: "Kecepatan Laku per Model",
+                    description: `Rata-rata hari unit terjual sejak masuk stok (Avg: ${overallAvgDays} hari)`,
+                    trend_indicator: velocityTrendIndicator,
+                    data: velocityData
                 },
                 {
                     card_id: "restock_alerts",
