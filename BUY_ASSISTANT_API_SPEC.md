@@ -256,13 +256,76 @@ notes: Transaksi berhasil dinego di angka 4.9jt
 {
   "message": "Data Buy Assistant berhasil diperbarui",
   "market_item_id": 84,
-  "type": "Drone"
+  "type": "Drone",
+  "ai_feedback_recorded": true,
+  "ai_feedback_id": 12
+}
+```
+> **Catatan Auto-Capture Feedback AI:** Setiap kali pengguna mengedit `type`, `drone_model_id`, `sub_model_id`, `accessory_id`, `fair_price`, atau `buy_recommendation` melalui `PUT /api/v1/buy-assistant/:id`, backend secara otomatis merekam koreksi tersebut ke tabel `ai_classification_feedback` agar AI belajar pada siklus scraping berikutnya. Anda juga dapat mengirimkan field opsional `feedback_reason` (alasan koreksi) dan `update_master_price: true` (untuk sekaligus memperbarui `default_sell_price` varian di katalog master).
+
+---
+
+## 5. POST Koreksi / Feedback Evaluasi AI Eksplisit
+Digunakan oleh tombol **"Koreksi AI"** di Frontend untuk memperbaiki klasifikasi model/varian, kisaran harga wajar (`fair_price`), serta menyimpan aturan pembelajaran baru untuk scraper AI.
+
+- **Endpoint:** `POST /api/v1/buy-assistant/:id/feedback`
+- **Method:** `POST`
+- **Content-Type:** `application/json`
+
+### Request Body (`application/json`)
+| Field | Tipe Data | Wajib? | Keterangan |
+|---|---|---|---|
+| `type` | String | Opsional | `'Drone'` atau `'Accessory'` |
+| `drone_model_id` | Number | Opsional | ID model drone yang benar (`drone_models.id`) |
+| `sub_model_id` | Number | Opsional | ID varian/sub-model yang benar (`drone_sub_models.id`) |
+| `accessory_id` | Number | Opsional | ID aksesoris yang benar (`accessories.id`) |
+| `condition` | String | Opsional | `'Baru'`, `'Mulus / Like New'`, `'Bekas'`, `'Minus / Rusak'` |
+| `condition_score` | Number | Opsional | Skor kondisi `1` - `5` |
+| `fair_price` | Number | Opsional | Harga pasar wajar yang dikoreksi (IDR) |
+| `buy_recommendation` | String | Opsional | `'BUY'`, `'CONSIDER'`, atau `'PASS'` |
+| `feedback_reason` | String | Opsional | Alasan koreksi / instruksi untuk AI (contoh: *"Varian RC-N3 tanpa layar bukan RC2, harga bekas 7.8jt"*) |
+| `update_master_price` | Boolean | Opsional | Jika `true`, otomatis meng-update `default_sell_price` pada `drone_sub_models` / `accessories` |
+| `update_sub_model_rule`| String | Opsional | Menambahkan kata kunci aturan ke `drone_sub_models.description` |
+
+### Contoh Request
+```json
+{
+  "type": "Drone",
+  "drone_model_id": 22,
+  "sub_model_id": 100,
+  "fair_price": 7800000,
+  "buy_recommendation": "PASS",
+  "feedback_reason": "Ini varian Avata 360 dengan remote RC-N3 (tanpa layar), bukan RC2.",
+  "update_master_price": true
+}
+```
+
+### Contoh Response (`201 Created`)
+```json
+{
+  "message": "Koreksi & Feedback AI berhasil disimpan untuk pembelajaran evaluasi berikutnya",
+  "feedback": {
+    "id": 15,
+    "market_item_id": 8395,
+    "original_model_id": 22,
+    "original_sub_model_id": 53,
+    "corrected_model_id": 22,
+    "corrected_sub_model_id": 100,
+    "corrected_fair_price": "7800000",
+    "feedback_reason": "Ini varian Avata 360 dengan remote RC-N3 (tanpa layar), bukan RC2."
+  }
 }
 ```
 
 ---
 
-## 5. DELETE Listing (Hapus)
+## 6. GET & DELETE Riwayat Feedback AI
+- **`GET /api/v1/buy-assistant/ai-feedbacks?limit=50`**: Mengambil daftar koreksi AI yang aktif digunakan sebagai konteks pembelajaran (*Few-Shot Prompting & Price Calibration*).
+- **`DELETE /api/v1/buy-assistant/ai-feedbacks/:feedbackId`**: Menonaktifkan item feedback tertentu.
+
+---
+
+## 7. DELETE Listing (Hapus)
 Menghapus listing beserta analisis dan data gambarnya.
 
 - **Endpoint:** `DELETE /api/v1/buy-assistant/:id`

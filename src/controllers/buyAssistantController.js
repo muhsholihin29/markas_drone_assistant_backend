@@ -330,7 +330,7 @@ const BUY_ASSISTANT_BASE_QUERY = `
         NULL::int                             AS sub_model_id,
         NULL::varchar                         AS sub_model_name,
         NULL::varchar                         AS completeness,
-        NULL::varchar                         AS location,
+        mac.location                          AS location,
         NULL::varchar                         AS seller_reputation,
         mac.condition,
         mac.condition_score                   AS condition_score,
@@ -506,11 +506,32 @@ const updateBuyAssistant = async function (req, res) {
         const author_id = req.body.author_id !== undefined ? req.body.author_id : null;
 
         const existingMarketItemRes = await client.query(
-            'SELECT source_platform, link, price, status FROM market_items WHERE id = $1',
+            `SELECT
+                mi.item_type,
+                mi.source_platform,
+                mi.link,
+                mi.price::float AS price,
+                mi.status,
+                mi.title,
+                mi.description,
+                md.drone_model_id,
+                md.sub_model_id::int AS sub_model_id,
+                md.condition AS drone_condition,
+                md.condition_score AS drone_condition_score,
+                mac.accessory_id,
+                mac.condition AS acc_condition,
+                mac.condition_score AS acc_condition_score,
+                ma.fair_price::float AS fair_price,
+                ma.buy_recommendation
+             FROM market_items mi
+             LEFT JOIN market_drones md ON md.id = mi.id
+             LEFT JOIN market_accessories mac ON mac.id = mi.id
+             LEFT JOIN market_analysis ma ON ma.market_item_id = mi.id
+             WHERE mi.id = $1`,
             [marketItemId]
         );
 
-        const existingMarketItem = existingMarketItemRes.rows[0];
+        const oldSnap = existingMarketItemRes.rows[0] || {};
 
         await client.query(
             `UPDATE market_items
@@ -779,12 +800,120 @@ const updateBuyAssistant = async function (req, res) {
             );
         }
 
+        // D. AUTO-CAPTURE AI FEEDBACK LOOP (When user corrects classification or valuation from Frontend)
+        const updatedSnapRes = await client.query(
+            `SELECT
+                mi.item_type,
+                mi.title,
+                mi.description,
+                mi.price::float AS price,
+                md.drone_model_id,
+                md.sub_model_id::int AS sub_model_id,
+                md.condition AS drone_condition,
+                md.condition_score AS drone_condition_score,
+                md.notes AS drone_notes,
+                mac.accessory_id,
+                mac.condition AS acc_condition,
+                mac.condition_score AS acc_condition_score,
+                mac.notes AS acc_notes,
+                ma.fair_price::float AS fair_price,
+                ma.buy_recommendation
+             FROM market_items mi
+             LEFT JOIN market_drones md ON md.id = mi.id
+             LEFT JOIN market_accessories mac ON mac.id = mi.id
+             LEFT JOIN market_analysis ma ON ma.market_item_id = mi.id
+             WHERE mi.id = $1`,
+            [marketItemId]
+        );
+        const newSnap = updatedSnapRes.rows[0] || {};
+
+        const oldCond = oldSnap.item_type === 'Accessory' ? oldSnap.acc_condition : oldSnap.drone_condition;
+        const oldCondScore = oldSnap.item_type === 'Accessory' ? oldSnap.acc_condition_score : oldSnap.drone_condition_score;
+        const newCond = newSnap.item_type === 'Accessory' ? newSnap.acc_condition : newSnap.drone_condition;
+        const newCondScore = newSnap.item_type === 'Accessory' ? newSnap.acc_condition_score : newSnap.drone_condition_score;
+
+        const classificationChanged =
+            oldSnap.item_type !== newSnap.item_type ||
+            (oldSnap.drone_model_id || null) !== (newSnap.drone_model_id || null) ||
+            (oldSnap.sub_model_id || null) !== (newSnap.sub_model_id || null) ||
+            (oldSnap.accessory_id || null) !== (newSnap.accessory_id || null) ||
+            (oldSnap.fair_price || null) !== (newSnap.fair_price || null) ||
+            (oldSnap.buy_recommendation || null) !== (newSnap.buy_recommendation || null) ||
+            Boolean(req.body.feedback_reason);
+
+        let feedbackId = null;
+        if (classificationChanged && req.body.skip_ai_feedback !== 'true') {
+            const feedbackReason = req.body.feedback_reason || req.body.notes || null;
+            const fbInsert = await client.query(
+                `INSERT INTO ai_classification_feedback (
+                    market_item_id, title, description_snippet, listing_price,
+                    original_item_type, original_model_id, original_sub_model_id, original_accessory_id,
+                    original_condition, original_condition_score, original_fair_price, original_recommendation,
+                    corrected_item_type, corrected_model_id, corrected_sub_model_id, corrected_accessory_id,
+                    corrected_condition, corrected_condition_score, corrected_fair_price, corrected_recommendation,
+                    feedback_reason, is_active
+                ) VALUES (
+                    $1, $2, $3, $4,
+                    $5, $6, $7, $8,
+                    $9, $10, $11, $12,
+                    $13, $14, $15, $16,
+                    $17, $18, $19, $20,
+                    $21, true
+                ) RETURNING id`,
+                [
+                    marketItemId,
+                    newSnap.title || oldSnap.title || null,
+                    (newSnap.description || oldSnap.description || '').substring(0, 500) || null,
+                    newSnap.price || oldSnap.price || null,
+                    oldSnap.item_type || null,
+                    oldSnap.drone_model_id || null,
+                    oldSnap.sub_model_id || null,
+                    oldSnap.accessory_id || null,
+                    oldCond || null,
+                    oldCondScore || null,
+                    oldSnap.fair_price || null,
+                    oldSnap.buy_recommendation || null,
+                    newSnap.item_type || null,
+                    newSnap.drone_model_id || null,
+                    newSnap.sub_model_id || null,
+                    newSnap.accessory_id || null,
+                    newCond || null,
+                    newCondScore || null,
+                    newSnap.fair_price || null,
+                    newSnap.buy_recommendation || null,
+                    feedbackReason
+                ]
+            );
+            feedbackId = fbInsert.rows[0].id;
+
+            // Optional: Also update master catalog default_sell_price if requested
+            if (
+                (req.body.update_master_price === true || req.body.update_master_price === 'true') &&
+                newSnap.fair_price &&
+                newSnap.fair_price > 0
+            ) {
+                if (newSnap.item_type === 'Drone' && newSnap.sub_model_id) {
+                    await client.query(
+                        `UPDATE drone_sub_models SET default_sell_price = $1 WHERE id = $2`,
+                        [newSnap.fair_price, newSnap.sub_model_id]
+                    );
+                } else if (newSnap.item_type === 'Accessory' && newSnap.accessory_id) {
+                    await client.query(
+                        `UPDATE accessories SET default_est_sell_price = $1 WHERE id = $2`,
+                        [newSnap.fair_price, newSnap.accessory_id]
+                    );
+                }
+            }
+        }
+
         await client.query('COMMIT');
 
         res.status(200).json({
             message: 'Data Buy Assistant berhasil diperbarui',
             market_item_id: marketItemId,
-            type: newType
+            type: newType,
+            ai_feedback_recorded: Boolean(feedbackId),
+            ai_feedback_id: feedbackId
         });
 
     } catch (err) {
@@ -1011,6 +1140,275 @@ const unblockUser = async function (req, res) {
     }
 };
 
+/**
+ * POST /api/v1/buy-assistant/:id/feedback
+ * Menyimpan koreksi/feedback evaluasi AI dari Frontend sekaligus memperbarui item & opsional harga katalog master
+ */
+const submitAIFeedback = async function (req, res) {
+    const marketItemId = parseInt(req.params.id);
+    if (!marketItemId || isNaN(marketItemId)) {
+        return res.status(400).json({ error: 'ID market item tidak valid' });
+    }
+
+    const {
+        type,
+        drone_model_id,
+        sub_model_id,
+        accessory_id,
+        condition,
+        condition_score,
+        fair_price,
+        buy_recommendation,
+        status,
+        feedback_reason,
+        update_master_price = false,
+        update_sub_model_rule = null
+    } = req.body || {};
+
+    const client = await db.pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // 1. Ambil state sebelum dikoreksi
+        const oldRes = await client.query(
+            `SELECT
+                mi.id,
+                mi.item_type,
+                mi.title,
+                mi.description,
+                mi.price::float AS price,
+                mi.status,
+                md.drone_model_id,
+                md.sub_model_id::int AS sub_model_id,
+                md.condition AS drone_condition,
+                md.condition_score AS drone_condition_score,
+                mac.accessory_id,
+                mac.condition AS acc_condition,
+                mac.condition_score AS acc_condition_score,
+                ma.fair_price::float AS fair_price,
+                ma.buy_recommendation
+             FROM market_items mi
+             LEFT JOIN market_drones md ON md.id = mi.id
+             LEFT JOIN market_accessories mac ON mac.id = mi.id
+             LEFT JOIN market_analysis ma ON ma.market_item_id = mi.id
+             WHERE mi.id = $1`,
+            [marketItemId]
+        );
+
+        if (oldRes.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Market item tidak ditemukan' });
+        }
+
+        const oldSnap = oldRes.rows[0];
+        const newType = type || oldSnap.item_type || 'Drone';
+        const newModelId = drone_model_id !== undefined ? (drone_model_id ? parseInt(drone_model_id) : null) : oldSnap.drone_model_id;
+        const newSubModelId = sub_model_id !== undefined ? (sub_model_id ? parseInt(sub_model_id) : null) : oldSnap.sub_model_id;
+        const newAccId = accessory_id !== undefined ? (accessory_id ? parseInt(accessory_id) : null) : oldSnap.accessory_id;
+        const oldCond = oldSnap.item_type === 'Accessory' ? oldSnap.acc_condition : oldSnap.drone_condition;
+        const oldCondScore = oldSnap.item_type === 'Accessory' ? oldSnap.acc_condition_score : oldSnap.drone_condition_score;
+        const newCond = condition !== undefined ? condition : oldCond;
+        const newCondScore = condition_score !== undefined ? (condition_score ? parseInt(condition_score) : null) : oldCondScore;
+        const newFairPrice = fair_price !== undefined && fair_price !== null && fair_price !== '' ? parseFloat(fair_price) : oldSnap.fair_price;
+        const itemPrice = oldSnap.price || 0;
+        const newProfit = newFairPrice && itemPrice > 0 ? Math.round(newFairPrice - itemPrice) : 0;
+        const newRec = buy_recommendation || oldSnap.buy_recommendation || (newProfit >= 500000 ? 'BUY' : 'CONSIDER');
+        const newStatus = status || (newRec === 'BUY' ? 'Watchlist' : (newRec === 'PASS' || newRec === 'SKIP' ? 'Skipped' : oldSnap.status));
+
+        // 2. Update market_items
+        await client.query(
+            `UPDATE market_items SET item_type = $1, status = $2, updated_at = NOW() WHERE id = $3`,
+            [newType, newStatus, marketItemId]
+        );
+
+        // 3. Update detail table
+        if (newType === 'Drone') {
+            await client.query(
+                `UPDATE market_drones
+                 SET drone_model_id = $1,
+                     sub_model_id = $2,
+                     condition = COALESCE($3, condition),
+                     condition_score = COALESCE($4, condition_score),
+                     notes = CASE WHEN $5::text IS NOT NULL THEN $5 ELSE notes END
+                 WHERE id = $6`,
+                [newModelId, newSubModelId, newCond, newCondScore, feedback_reason || null, marketItemId]
+            );
+        } else if (newType === 'Accessory') {
+            await client.query(
+                `UPDATE market_accessories
+                 SET accessory_id = $1,
+                     condition = COALESCE($2, condition),
+                     condition_score = COALESCE($3, condition_score),
+                     notes = CASE WHEN $4::text IS NOT NULL THEN $4 ELSE notes END
+                 WHERE id = $5`,
+                [newAccId, newCond, newCondScore, feedback_reason || null, marketItemId]
+            );
+        }
+
+        // 4. Update market_analysis
+        const existingAnalysis = await client.query(`SELECT id FROM market_analysis WHERE market_item_id = $1`, [marketItemId]);
+        if (existingAnalysis.rows.length > 0) {
+            await client.query(
+                `UPDATE market_analysis
+                 SET fair_price = COALESCE($1, fair_price),
+                     condition_score = COALESCE($2, condition_score),
+                     profit_prediction = $3,
+                     buy_recommendation = $4
+                 WHERE market_item_id = $5`,
+                [newFairPrice, newCondScore, newProfit, newRec, marketItemId]
+            );
+        } else {
+            await client.query(
+                `INSERT INTO market_analysis (market_item_id, fair_price, price_score, condition_score, completeness_score, profit_prediction, buy_recommendation)
+                 VALUES ($1, $2, 6, $3, 5, $4, $5)`,
+                [marketItemId, newFairPrice || 0, newCondScore || 4, newProfit, newRec]
+            );
+        }
+
+        // 5. Insert into ai_classification_feedback
+        const fbRes = await client.query(
+            `INSERT INTO ai_classification_feedback (
+                market_item_id, title, description_snippet, listing_price,
+                original_item_type, original_model_id, original_sub_model_id, original_accessory_id,
+                original_condition, original_condition_score, original_fair_price, original_recommendation,
+                corrected_item_type, corrected_model_id, corrected_sub_model_id, corrected_accessory_id,
+                corrected_condition, corrected_condition_score, corrected_fair_price, corrected_recommendation,
+                feedback_reason, is_active
+            ) VALUES (
+                $1, $2, $3, $4,
+                $5, $6, $7, $8,
+                $9, $10, $11, $12,
+                $13, $14, $15, $16,
+                $17, $18, $19, $20,
+                $21, true
+            ) RETURNING *`,
+            [
+                marketItemId,
+                oldSnap.title || null,
+                (oldSnap.description || '').substring(0, 500) || null,
+                oldSnap.price || null,
+                oldSnap.item_type || null,
+                oldSnap.drone_model_id || null,
+                oldSnap.sub_model_id || null,
+                oldSnap.accessory_id || null,
+                oldCond || null,
+                oldCondScore || null,
+                oldSnap.fair_price || null,
+                oldSnap.buy_recommendation || null,
+                newType,
+                newModelId,
+                newSubModelId,
+                newAccId,
+                newCond,
+                newCondScore,
+                newFairPrice,
+                newRec,
+                feedback_reason || null
+            ]
+        );
+
+        // 6. Optional: Update master catalog default_sell_price or sub-model rule description
+        if ((update_master_price === true || update_master_price === 'true') && newFairPrice && newFairPrice > 0) {
+            if (newType === 'Drone' && newSubModelId) {
+                await client.query(
+                    `UPDATE drone_sub_models SET default_sell_price = $1 WHERE id = $2`,
+                    [newFairPrice, newSubModelId]
+                );
+            } else if (newType === 'Accessory' && newAccId) {
+                await client.query(
+                    `UPDATE accessories SET default_est_sell_price = $1 WHERE id = $2`,
+                    [newFairPrice, newAccId]
+                );
+            }
+        }
+
+        if (update_sub_model_rule && newSubModelId) {
+            await client.query(
+                `UPDATE drone_sub_models
+                 SET description = CASE
+                     WHEN description IS NULL OR LENGTH(TRIM(description)) = 0 THEN $1
+                     ELSE description || ' | ' || $1
+                 END
+                 WHERE id = $2`,
+                [String(update_sub_model_rule).trim(), newSubModelId]
+            );
+        }
+
+        await client.query('COMMIT');
+
+        res.status(201).json({
+            message: 'Koreksi & Feedback AI berhasil disimpan untuk pembelajaran evaluasi berikutnya',
+            feedback: fbRes.rows[0]
+        });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('Submit AI Feedback Error:', err);
+        res.status(500).json({ error: err.message });
+    } finally {
+        client.release();
+    }
+};
+
+/**
+ * GET /api/v1/buy-assistant/ai-feedbacks
+ * Mengambil riwayat koreksi/feedback evaluasi AI
+ */
+const getAIFeedbacks = async function (req, res) {
+    try {
+        const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+        const result = await db.query(
+            `SELECT
+                f.*,
+                dm_orig.model_name AS original_model_name,
+                dsm_orig.name AS original_sub_model_name,
+                dm_corr.model_name AS corrected_model_name,
+                dsm_corr.name AS corrected_sub_model_name,
+                acc_corr.name AS corrected_accessory_name
+             FROM ai_classification_feedback f
+             LEFT JOIN drone_models dm_orig ON dm_orig.id = f.original_model_id
+             LEFT JOIN drone_sub_models dsm_orig ON dsm_orig.id = f.original_sub_model_id
+             LEFT JOIN drone_models dm_corr ON dm_corr.id = f.corrected_model_id
+             LEFT JOIN drone_sub_models dsm_corr ON dsm_corr.id = f.corrected_sub_model_id
+             LEFT JOIN accessories acc_corr ON acc_corr.id = f.corrected_accessory_id
+             WHERE f.is_active = true
+             ORDER BY f.created_at DESC
+             LIMIT $1`,
+            [limit]
+        );
+        res.status(200).json(result.rows);
+    } catch (err) {
+        console.error('Get AI Feedbacks Error:', err);
+        res.status(500).json({ error: err.message });
+    }
+};
+
+/**
+ * DELETE /api/v1/buy-assistant/ai-feedbacks/:feedbackId
+ * Menonaktifkan rule/feedback koreksi AI
+ */
+const deleteAIFeedback = async function (req, res) {
+    const feedbackId = parseInt(req.params.feedbackId);
+    try {
+        const result = await db.query(
+            `UPDATE ai_classification_feedback
+             SET is_active = false, updated_at = NOW()
+             WHERE id = $1
+             RETURNING *`,
+            [feedbackId]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Data feedback AI tidak ditemukan' });
+        }
+        res.status(200).json({
+            message: 'Feedback AI berhasil dihapus/dinonaktifkan',
+            data: result.rows[0]
+        });
+    } catch (err) {
+        console.error('Delete AI Feedback Error:', err);
+        res.status(500).json({ error: err.message });
+    }
+};
+
 module.exports = {
     createBuyAssistant: createBuyAssistant,
     getRecommendations: getRecommendations,
@@ -1019,5 +1417,8 @@ module.exports = {
     deleteBuyAssistant: deleteBuyAssistant,
     blockUser: blockUser,
     getBlockedUsers: getBlockedUsers,
-    unblockUser: unblockUser
+    unblockUser: unblockUser,
+    submitAIFeedback: submitAIFeedback,
+    getAIFeedbacks: getAIFeedbacks,
+    deleteAIFeedback: deleteAIFeedback
 };

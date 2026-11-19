@@ -40,6 +40,15 @@ router.post('/unblock-user/:id', buyAssistantController.unblockUser);
 // DELETE /api/v1/buy-assistant/blocked-users/:id — Buka blokir user (RESTful alternate)
 router.delete('/blocked-users/:id', buyAssistantController.unblockUser);
 
+// GET /api/v1/buy-assistant/ai-feedbacks — Riwayat koreksi / pembelajaran AI
+router.get('/ai-feedbacks', buyAssistantController.getAIFeedbacks);
+
+// DELETE /api/v1/buy-assistant/ai-feedbacks/:feedbackId — Hapus/nonaktifkan rule feedback AI
+router.delete('/ai-feedbacks/:feedbackId', buyAssistantController.deleteAIFeedback);
+
+// POST /api/v1/buy-assistant/:id/feedback — Kirim koreksi eksplisit evaluasi AI (Model/Sub-Model/Fair Price/Alasan)
+router.post('/:id/feedback', buyAssistantController.submitAIFeedback);
+
 // GET /api/v1/buy-assistant/:id — Detail item Buy Assistant
 router.get('/:id', buyAssistantController.getBuyAssistantDetail);
 
