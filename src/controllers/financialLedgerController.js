@@ -35,6 +35,18 @@ const getSignedAmountSql = (alias = '') => {
 `;
 };
 
+const getLiquidSignedAmountSql = (alias = '') => {
+    const prefix = alias ? `${alias}.` : '';
+
+    return `
+    CASE
+        WHEN ${prefix}type IN ('SALE', 'CAPITAL_INJECTION', 'LOAN_TAKEN', 'REFUND') AND ${prefix}status = 'SUCCESS' THEN ABS(${prefix}total_amount)
+        WHEN ${prefix}type IN ('PURCHASE', 'LOAN_REPAYMENT', 'REPAIR', 'PRIVE') AND ${prefix}status IN ('SUCCESS', 'PROCESS') THEN -ABS(${prefix}total_amount)
+        ELSE 0
+    END
+`;
+};
+
 const getFinancialLedger = async (req, res) => {
     try {
         const month = Number(req.query.month);
@@ -56,10 +68,17 @@ const getFinancialLedger = async (req, res) => {
         ] = await Promise.all([
             db.query(`
                 SELECT
-                    COALESCE(SUM(${getSignedAmountSql()}), 0)::numeric AS cash_available,
+                    COALESCE(SUM(${getLiquidSignedAmountSql()}), 0)::numeric AS cash_available,
                     COALESCE(SUM(CASE
-                        WHEN type = 'LOAN_TAKEN' THEN ABS(total_amount)
-                        WHEN type = 'LOAN_REPAYMENT' THEN -ABS(total_amount)
+                        WHEN type IN ('SALE', 'REFUND') AND status = 'PROCESS' THEN ABS(total_amount)
+                        ELSE 0
+                    END), 0)::numeric AS pending_cash,
+                    COUNT(CASE
+                        WHEN type IN ('SALE', 'REFUND') AND status = 'PROCESS' THEN 1
+                    END)::int AS pending_count,
+                    COALESCE(SUM(CASE
+                        WHEN type = 'LOAN_TAKEN' AND status IN ('SUCCESS', 'PROCESS') THEN ABS(total_amount)
+                        WHEN type = 'LOAN_REPAYMENT' AND status IN ('SUCCESS', 'PROCESS') THEN -ABS(total_amount)
                         ELSE 0
                     END), 0)::numeric AS loan_balance
                 FROM transactions
@@ -69,7 +88,7 @@ const getFinancialLedger = async (req, res) => {
                 SELECT type, COALESCE(SUM(ABS(total_amount)), 0)::numeric AS amount
                 FROM transactions
                 WHERE type = ANY($1)
-                  AND status IN ('SUCCESS', 'PROCESS')
+                  AND status = 'SUCCESS'
                   AND EXTRACT(MONTH FROM date) = $2
                   AND EXTRACT(YEAR FROM date) = $3
                 GROUP BY type
@@ -88,10 +107,12 @@ const getFinancialLedger = async (req, res) => {
                     SELECT
                         t.id,
                         t.type,
+                        t.status,
+                        t.platform,
                         t.date,
                         t.total_amount,
                         t.notes,
-                        SUM(${getSignedAmountSql('t')}) OVER (
+                        SUM(${getLiquidSignedAmountSql('t')}) OVER (
                             ORDER BY t.date ASC, t.id ASC
                             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                         )::numeric AS balance_after
@@ -101,6 +122,8 @@ const getFinancialLedger = async (req, res) => {
                 SELECT
                     l.id,
                     l.type,
+                    l.status,
+                    l.platform,
                     l.date,
                     ABS(l.total_amount)::numeric AS amount,
                     l.balance_after,
@@ -141,6 +164,8 @@ const getFinancialLedger = async (req, res) => {
         res.json({
             header: {
                 cash_available: parseNum(headerData.cash_available),
+                pending_cash: parseNum(headerData.pending_cash),
+                pending_count: parseNum(headerData.pending_count),
                 loan_balance: parseNum(headerData.loan_balance),
                 currency_symbol: 'Rp '
             },
@@ -161,7 +186,9 @@ const getFinancialLedger = async (req, res) => {
                     date: row.date,
                     amount: parseNum(row.amount),
                     balance_after: parseNum(row.balance_after),
-                    type: isCashIn ? 'IN' : 'OUT'
+                    type: isCashIn ? 'IN' : 'OUT',
+                    status: row.status || 'SUCCESS',
+                    platform: row.platform || ''
                 };
             })
         });

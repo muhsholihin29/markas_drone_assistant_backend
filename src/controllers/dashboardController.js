@@ -18,15 +18,36 @@ const getDashboardData = async (req, res) => {
             businessWalletResult,
             marketInsightsResult
         ] = await Promise.all([
-            // 1. Sales Overview (Bulan Ini)
+            // 1. Sales Overview (Bulan Ini + Real-time MoM Apple-to-Apple + Settled vs Pending Profit)
             db.query(`
         SELECT 
-          SUM(t.total_amount) as total_sales,
-          SUM(t.total_amount) - SUM(t.total_cogs) as total_profit
+          COALESCE(SUM(t.total_amount) FILTER (
+            WHERE date_trunc('month', t.date) = date_trunc('month', CURRENT_DATE)
+          ), 0) as total_sales,
+          COALESCE(SUM(t.total_amount - t.total_cogs) FILTER (
+            WHERE date_trunc('month', t.date) = date_trunc('month', CURRENT_DATE)
+          ), 0) as total_profit,
+          COALESCE(SUM(t.total_amount - t.total_cogs) FILTER (
+            WHERE date_trunc('month', t.date) = date_trunc('month', CURRENT_DATE)
+              AND t.status = 'SUCCESS'
+          ), 0) as settled_profit,
+          COALESCE(SUM(t.total_amount - t.total_cogs) FILTER (
+            WHERE date_trunc('month', t.date) = date_trunc('month', CURRENT_DATE)
+              AND t.status = 'PROCESS'
+          ), 0) as pending_profit,
+          COALESCE(SUM(t.total_amount - t.total_cogs) FILTER (
+            WHERE t.date >= date_trunc('month', CURRENT_DATE - INTERVAL '1 month')
+              AND t.date < date_trunc('month', CURRENT_DATE)
+              AND EXTRACT(DAY FROM t.date) <= EXTRACT(DAY FROM CURRENT_DATE)
+          ), 0) as prev_month_same_period_profit,
+          COALESCE(SUM(t.total_amount - t.total_cogs) FILTER (
+            WHERE date_trunc('month', t.date) = date_trunc('month', CURRENT_DATE - INTERVAL '1 month')
+          ), 0) as prev_month_full_profit
         FROM transactions t
         WHERE t.type = 'SALE' 
           AND t.status IN ('SUCCESS', 'PROCESS')
-          AND date_trunc('month', t.date) = date_trunc('month', CURRENT_DATE)
+          AND t.date >= date_trunc('month', CURRENT_DATE - INTERVAL '1 month')
+          AND t.date < date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'
       `),
 
             // 2. Stock Card: Ready Stock
@@ -35,9 +56,13 @@ const getDashboardData = async (req, res) => {
         FROM drones WHERE status = 'Ready'
       `),
 
-            // 3. Stock Card: Repair Stock
+            // 3. Stock Card: Repair Stock (+ Potential Revenue & Profit Locked in Repair)
             db.query(`
-        SELECT COUNT(id) as total_count, COALESCE(SUM(purchase_price), 0) as total_value
+        SELECT 
+          COUNT(id) as total_count, 
+          COALESCE(SUM(purchase_price), 0) as total_value,
+          COALESCE(SUM(COALESCE(est_sell_price, purchase_price)), 0) as potential_sell_value,
+          COALESCE(SUM(GREATEST(0, COALESCE(est_sell_price, purchase_price) - COALESCE(purchase_price, 0))), 0) as potential_profit
         FROM drones WHERE status = 'Repair'
       `),
 
@@ -122,13 +147,16 @@ const getDashboardData = async (req, res) => {
         LIMIT 5
       `),
 
-            // 8. Analytics: Slow Moving Stock (Aging Inventory)
+            // 8. Analytics: Slow Moving Stock (Aging Inventory + Smart Markdown Suggestion)
             db.query(`
         WITH stock_data AS (
           SELECT 
             dm.id as model_id,
             dm.model_name,
-            COUNT(d.id)::int as current_stock
+            COUNT(d.id)::int as current_stock,
+            MIN(d.id)::int as sample_drone_id,
+            COALESCE(AVG(d.purchase_price), 0)::float as avg_purchase_price,
+            COALESCE(AVG(COALESCE(d.est_sell_price, dm.default_est_sell_price, d.purchase_price * 1.15)), 0)::float as avg_est_sell_price
           FROM drone_models dm
           LEFT JOIN drones d ON dm.id = d.model_id AND d.status = 'Ready'
           GROUP BY dm.id, dm.model_name
@@ -147,6 +175,9 @@ const getDashboardData = async (req, res) => {
         SELECT 
           sd.model_name,
           sd.current_stock,
+          sd.sample_drone_id,
+          sd.avg_purchase_price,
+          sd.avg_est_sell_price,
           EXTRACT(DAY FROM AGE(CURRENT_DATE, ls.last_sale_date))::int as days_since_last_sale
         FROM stock_data sd
         JOIN last_sale ls ON sd.model_id = ls.model_id
@@ -156,41 +187,58 @@ const getDashboardData = async (req, res) => {
         LIMIT 5
       `),
 
-            // 9. Alert: Stok Ready Terlama (1 Item)
+            // 9. Alert: Stok Ready Terlama (1 Item + Markdown Hint)
             db.query(`
-        SELECT d.id, dm.model_name, EXTRACT(DAY FROM AGE(CURRENT_DATE, d.updated_at)) as days
+        SELECT 
+          d.id, 
+          dm.model_name, 
+          EXTRACT(DAY FROM AGE(CURRENT_DATE, COALESCE(d.purchase_date::timestamp, d.updated_at)))::int as days,
+          COALESCE(d.purchase_price, 0)::float as purchase_price,
+          COALESCE(d.est_sell_price, dm.default_est_sell_price, 0)::float as est_sell_price
         FROM drones d
         JOIN drone_models dm ON d.model_id = dm.id
         WHERE d.status = 'Ready'
-        ORDER BY d.updated_at ASC
+        ORDER BY COALESCE(d.purchase_date::timestamp, d.updated_at) ASC
         LIMIT 1
       `),
 
-            // 10. Alert: Stok Repair Terlama (1 Item)
+            // 10. Alert: Stok Repair Prioritas (Terlama & Potensi Profit Tertinggi, max 2 item)
             db.query(`
-        SELECT d.id, dm.model_name, EXTRACT(DAY FROM AGE(CURRENT_DATE, d.updated_at)) as days
+        SELECT 
+          d.id, 
+          dm.model_name, 
+          EXTRACT(DAY FROM AGE(CURRENT_DATE, COALESCE(d.purchase_date::timestamp, d.updated_at)))::int as days,
+          COALESCE(d.purchase_price, 0)::float as purchase_price,
+          COALESCE(d.est_sell_price, dm.default_est_sell_price, 0)::float as est_sell_price
         FROM drones d
         JOIN drone_models dm ON d.model_id = dm.id
         WHERE d.status = 'Repair'
-        ORDER BY d.updated_at ASC
-        LIMIT 1
+        ORDER BY EXTRACT(DAY FROM AGE(CURRENT_DATE, COALESCE(d.purchase_date::timestamp, d.updated_at))) DESC,
+                 GREATEST(0, COALESCE(d.est_sell_price, dm.default_est_sell_price, 0) - COALESCE(d.purchase_price, 0)) DESC
+        LIMIT 2
       `),
 
-            // 11. Business Wallet
+            // 11. Business Wallet (Liquid Cash Available vs Pending Escrow PROCESS)
             db.query(`
         SELECT
           COALESCE(SUM(CASE
-            WHEN type IN ('SALE', 'CAPITAL_INJECTION', 'LOAN_TAKEN', 'REFUND') THEN ABS(total_amount)
-            WHEN type IN ('PURCHASE', 'LOAN_REPAYMENT', 'REPAIR', 'PRIVE') THEN -ABS(total_amount)
+            WHEN type IN ('SALE', 'CAPITAL_INJECTION', 'LOAN_TAKEN', 'REFUND') AND status = 'SUCCESS' THEN ABS(total_amount)
+            WHEN type IN ('PURCHASE', 'LOAN_REPAYMENT', 'REPAIR', 'PRIVE') AND status IN ('SUCCESS', 'PROCESS') THEN -ABS(total_amount)
             ELSE 0
           END), 0)::numeric AS cash_available,
           COALESCE(SUM(CASE
-            WHEN type = 'LOAN_TAKEN' THEN ABS(total_amount)
-            WHEN type = 'LOAN_REPAYMENT' THEN -ABS(total_amount)
+            WHEN type IN ('SALE', 'REFUND') AND status = 'PROCESS' THEN ABS(total_amount)
+            ELSE 0
+          END), 0)::numeric AS pending_cash,
+          COUNT(CASE
+            WHEN type IN ('SALE', 'REFUND') AND status = 'PROCESS' THEN 1
+          END)::int AS pending_count,
+          COALESCE(SUM(CASE
+            WHEN type = 'LOAN_TAKEN' AND status IN ('SUCCESS', 'PROCESS') THEN ABS(total_amount)
+            WHEN type = 'LOAN_REPAYMENT' AND status IN ('SUCCESS', 'PROCESS') THEN -ABS(total_amount)
             ELSE 0
           END), 0)::numeric AS savings_debt
         FROM transactions
-        WHERE status IN ('SUCCESS', 'PROCESS')
       `),
 
             // 12. Market Insights (urutkan berdasarkan margin terbesar)
@@ -263,10 +311,39 @@ const getDashboardData = async (req, res) => {
 
         const parseNum = (val) => Number(val) || 0;
 
-        const salesData = salesOverviewResult.rows[0];
+        const formatIdrCompact = (val) => {
+            if (val >= 1000000) return `Rp ${(val / 1000000).toFixed(1).replace('.', ',')} jt`;
+            if (val >= 1000) return `Rp ${Math.round(val / 1000)} rb`;
+            return `Rp ${Math.round(val)}`;
+        };
 
-        const profitChange = 12.5;
-        const isProfitUp = true;
+        const salesData = salesOverviewResult.rows[0] || {};
+        const totalSales = parseNum(salesData.total_sales);
+        const totalProfit = parseNum(salesData.total_profit);
+        const settledProfit = parseNum(salesData.settled_profit);
+        const pendingProfit = parseNum(salesData.pending_profit);
+        const prevSamePeriodProfit = parseNum(salesData.prev_month_same_period_profit);
+        const prevFullProfit = parseNum(salesData.prev_month_full_profit);
+        const baselinePrevProfit = prevSamePeriodProfit !== 0 ? prevSamePeriodProfit : prevFullProfit;
+
+        let profitChange = 0;
+        let isProfitUp = true;
+        if (baselinePrevProfit > 0) {
+            const rawPct = ((totalProfit - baselinePrevProfit) / baselinePrevProfit) * 100;
+            isProfitUp = totalProfit >= baselinePrevProfit;
+            profitChange = Math.abs(Number(rawPct.toFixed(1)));
+        } else if (totalProfit > 0) {
+            profitChange = 100;
+            isProfitUp = true;
+        } else if (totalProfit < 0) {
+            profitChange = 100;
+            isProfitUp = false;
+        }
+
+        const now = new Date();
+        const dayOfMonth = Math.max(1, now.getDate());
+        const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+        const projectedProfit = Math.round((totalProfit / dayOfMonth) * daysInMonth);
 
         // 1. Top Selling Model processing
         const topSellingData = topSellingResult.rows.map((row, index) => ({
@@ -312,27 +389,63 @@ const getDashboardData = async (req, res) => {
             };
         });
 
-        // 4. Slow Moving processing
-        const slowMovingData = slowMovingResult.rows.map(row => ({
-            model_name: row.model_name,
-            current_stock: parseNum(row.current_stock),
-            days_since_last_sale: parseNum(row.days_since_last_sale),
-            status_badge: "Warning"
-        }));
+        // 4. Slow Moving processing (+ Smart Markdown Recommendation)
+        const slowMovingData = slowMovingResult.rows.map(row => {
+            const avgBuy = parseNum(row.avg_purchase_price);
+            const avgSell = parseNum(row.avg_est_sell_price);
+            const estMargin = Math.max(0, avgSell - avgBuy);
+            const recommendedDiscount = estMargin > 200000
+                ? Math.round((estMargin * 0.35) / 50000) * 50000
+                : 0;
+            const estProfitAfterDiscount = Math.max(0, estMargin - recommendedDiscount);
+            return {
+                model_name: row.model_name,
+                current_stock: parseNum(row.current_stock),
+                days_since_last_sale: parseNum(row.days_since_last_sale),
+                status_badge: "Warning",
+                sample_drone_id: row.sample_drone_id ? parseNum(row.sample_drone_id) : null,
+                recommended_discount: recommendedDiscount,
+                est_profit_after_discount: estProfitAfterDiscount
+            };
+        });
 
         const alerts = [];
         if (alertsReadyResult.rows.length > 0) {
+            const r = alertsReadyResult.rows[0];
+            const buyPrice = parseNum(r.purchase_price);
+            const sellPrice = parseNum(r.est_sell_price);
+            const potentialProfit = Math.max(0, sellPrice - buyPrice);
+            const suggestedCut = potentialProfit > 200000
+                ? Math.round((potentialProfit * 0.35) / 50000) * 50000
+                : 0;
             alerts.push({
-                item: alertsReadyResult.rows[0].model_name,
-                days: parseNum(alertsReadyResult.rows[0].days),
-                type: 'Ready'
+                item_id: parseNum(r.id),
+                item: r.model_name,
+                days: parseNum(r.days),
+                type: 'Ready',
+                purchase_price: buyPrice,
+                est_sell_price: sellPrice,
+                potential_profit: potentialProfit,
+                action_hint: suggestedCut > 0
+                    ? `Saran diskon ${formatIdrCompact(suggestedCut)} (sisa cuan ${formatIdrCompact(potentialProfit - suggestedCut)})`
+                    : 'Evaluasi harga jual atau buat paket bundling'
             });
         }
-        if (alertsRepairResult.rows.length > 0) {
+        for (const r of alertsRepairResult.rows) {
+            const buyPrice = parseNum(r.purchase_price);
+            const sellPrice = parseNum(r.est_sell_price);
+            const potentialProfit = Math.max(0, sellPrice - buyPrice);
             alerts.push({
-                item: alertsRepairResult.rows[0].model_name,
-                days: parseNum(alertsRepairResult.rows[0].days),
-                type: 'Repair'
+                item_id: parseNum(r.id),
+                item: r.model_name,
+                days: parseNum(r.days),
+                type: 'Repair',
+                purchase_price: buyPrice,
+                est_sell_price: sellPrice,
+                potential_profit: potentialProfit,
+                action_hint: potentialProfit > 0
+                    ? `Prioritaskan servis • Potensi cuan +${formatIdrCompact(potentialProfit)}`
+                    : 'Segera cek status perbaikan agar modal tidak tertahan'
             });
         }
 
@@ -353,11 +466,15 @@ const getDashboardData = async (req, res) => {
         }));
 
         const businessWalletData = businessWalletResult.rows[0] || {};
+        const repairRow = stockRepairResult.rows[0] || {};
 
         const responseData = {
             sales_overview: {
-                total_sales: parseNum(salesData.total_sales),
-                total_profit: parseNum(salesData.total_profit),
+                total_sales: totalSales,
+                total_profit: totalProfit,
+                settled_profit: settledProfit,
+                pending_profit: pendingProfit,
+                projected_profit: projectedProfit,
                 profit_change_percentage: profitChange,
                 is_profit_up: isProfitUp
             },
@@ -365,21 +482,29 @@ const getDashboardData = async (req, res) => {
                 {
                     title: "Ready Stock",
                     total_monetary_value: parseNum(stockReadyResult.rows[0].total_value),
-                    total_count: parseNum(stockReadyResult.rows[0].total_count)
+                    total_count: parseNum(stockReadyResult.rows[0].total_count),
+                    potential_sell_value: 0,
+                    potential_profit: 0
                 },
                 {
                     title: "Repair Stock",
-                    total_monetary_value: parseNum(stockRepairResult.rows[0].total_value),
-                    total_count: parseNum(stockRepairResult.rows[0].total_count)
+                    total_monetary_value: parseNum(repairRow.total_value),
+                    total_count: parseNum(repairRow.total_count),
+                    potential_sell_value: parseNum(repairRow.potential_sell_value),
+                    potential_profit: parseNum(repairRow.potential_profit)
                 },
                 {
                     title: "Accessory Value",
                     total_monetary_value: parseNum(accessoryResult.rows[0].total_value),
-                    total_count: parseNum(accessoryResult.rows[0].total_count)
+                    total_count: parseNum(accessoryResult.rows[0].total_count),
+                    potential_sell_value: 0,
+                    potential_profit: 0
                 }
             ],
             business_wallet: {
                 cash_available: parseNum(businessWalletData.cash_available),
+                pending_cash: parseNum(businessWalletData.pending_cash),
+                pending_count: parseNum(businessWalletData.pending_count),
                 savings_debt: parseNum(businessWalletData.savings_debt)
             },
             analytics_previews: [
