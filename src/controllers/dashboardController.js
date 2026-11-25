@@ -74,15 +74,33 @@ const getDashboardData = async (req, res) => {
         FROM ready_aged
       `),
 
-            // 3. Stock Card: Repair Stock (+ Potential Revenue, Profit & >14d Overdue Count)
+            // 3. Stock Card: Repair Stock (+ Potential Revenue, Profit & 4-Tier Aging Breakdown)
             db.query(`
+        WITH repair_aged AS (
+          SELECT
+            id,
+            COALESCE(purchase_price, 0)::numeric AS val,
+            COALESCE(est_sell_price, purchase_price, 0)::numeric AS sell_val,
+            GREATEST(0, COALESCE(est_sell_price, purchase_price, 0) - COALESCE(purchase_price, 0))::numeric AS profit_val,
+            GREATEST(0, (CURRENT_DATE - COALESCE(purchase_date, updated_at::date, created_at::date)))::int AS age_days
+          FROM drones
+          WHERE status = 'Repair'
+        )
         SELECT 
-          COUNT(id)::int as total_count, 
-          COALESCE(SUM(purchase_price), 0) as total_value,
-          COALESCE(SUM(COALESCE(est_sell_price, purchase_price)), 0) as potential_sell_value,
-          COALESCE(SUM(GREATEST(0, COALESCE(est_sell_price, purchase_price) - COALESCE(purchase_price, 0))), 0) as potential_profit,
-          COUNT(id) FILTER (WHERE (CURRENT_DATE - COALESCE(purchase_date, updated_at::date)) > 14)::int as overdue_repair_count
-        FROM drones WHERE status = 'Repair'
+          COUNT(id)::int AS total_count, 
+          COALESCE(SUM(val), 0) AS total_value,
+          COALESCE(SUM(sell_val), 0) AS potential_sell_value,
+          COALESCE(SUM(profit_val), 0) AS potential_profit,
+          COUNT(id) FILTER (WHERE age_days > 14)::int AS overdue_repair_count,
+          COUNT(id) FILTER (WHERE age_days <= 90)::int AS fresh_count,
+          COALESCE(SUM(val) FILTER (WHERE age_days <= 90), 0) AS fresh_value,
+          COUNT(id) FILTER (WHERE age_days BETWEEN 91 AND 180)::int AS watch_count,
+          COALESCE(SUM(val) FILTER (WHERE age_days BETWEEN 91 AND 180), 0) AS watch_value,
+          COUNT(id) FILTER (WHERE age_days BETWEEN 181 AND 365)::int AS critical_count,
+          COALESCE(SUM(val) FILTER (WHERE age_days BETWEEN 181 AND 365), 0) AS critical_value,
+          COUNT(id) FILTER (WHERE age_days > 365)::int AS dead_count,
+          COALESCE(SUM(val) FILTER (WHERE age_days > 365), 0) AS dead_value
+        FROM repair_aged
       `),
 
             // 4. Stock Card: Accessory Value
@@ -587,7 +605,17 @@ const getDashboardData = async (req, res) => {
                     total_count: parseNum(repairRow.total_count),
                     potential_sell_value: parseNum(repairRow.potential_sell_value),
                     potential_profit: parseNum(repairRow.potential_profit),
-                    overdue_repair_count: parseNum(repairRow.overdue_repair_count)
+                    overdue_repair_count: parseNum(repairRow.overdue_repair_count),
+                    aging_breakdown: {
+                        fresh_count: parseNum(repairRow.fresh_count),
+                        fresh_value: parseNum(repairRow.fresh_value),
+                        watch_count: parseNum(repairRow.watch_count),
+                        watch_value: parseNum(repairRow.watch_value),
+                        critical_count: parseNum(repairRow.critical_count),
+                        critical_value: parseNum(repairRow.critical_value),
+                        dead_count: parseNum(repairRow.dead_count),
+                        dead_value: parseNum(repairRow.dead_value)
+                    }
                 },
                 {
                     title: "Accessory Value",
