@@ -35,6 +35,33 @@ function buildSessionTitle(messageText) {
         .replace(/\s+/g, ' ')
         .trim();
     if (!clean) return 'Diskusi Bisnis Baru';
+
+    if (/strategi operasional\s*&\s*prioritas hari ini/i.test(clean)) {
+        const now = new Date();
+        const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+        return `📋 Strategi Harian (${now.getDate()} ${months[now.getMonth()]})`;
+    }
+
+    const dealMatch = clean.match(/membeli stok drone\s+([^,.\n]+?)\s+dengan harga\s+([^\s,.\n]+)/i);
+    if (dealMatch) {
+        const model = dealMatch[1].trim();
+        const price = dealMatch[2].trim();
+        const title = `🎯 Simulasi Beli: ${model} (${price})`;
+        return title.length > 60 ? `${title.substring(0, 57)}...` : title;
+    }
+
+    if (/review transaksi bulan/i.test(clean)) {
+        return '📊 Review Transaksi & Strategi Bulanan';
+    }
+
+    if (/stok drone yang mengendap paling lama/i.test(clean)) {
+        return '📦 Audit Slow-Moving & Repair';
+    }
+
+    if (/paling cepat perputarannya.*market/i.test(clean)) {
+        return '🔎 Rekomendasi Restock & Market Radar';
+    }
+
     return clean.length > 60 ? `${clean.substring(0, 57)}...` : clean;
 }
 
