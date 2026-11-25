@@ -50,19 +50,38 @@ const getDashboardData = async (req, res) => {
           AND t.date < date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'
       `),
 
-            // 2. Stock Card: Ready Stock
+            // 2. Stock Card: Ready Stock (+ 4-Tier Aging Health Breakdown: <=90d, 91-180d, 181-365d, >365d)
             db.query(`
-        SELECT COUNT(id) as total_count, COALESCE(SUM(purchase_price), 0) as total_value
-        FROM drones WHERE status = 'Ready'
+        WITH ready_aged AS (
+          SELECT
+            id,
+            COALESCE(purchase_price, 0)::numeric AS val,
+            GREATEST(0, (CURRENT_DATE - COALESCE(purchase_date, created_at::date)))::int AS age_days
+          FROM drones
+          WHERE status = 'Ready'
+        )
+        SELECT
+          COUNT(id)::int AS total_count,
+          COALESCE(SUM(val), 0) AS total_value,
+          COUNT(id) FILTER (WHERE age_days <= 90)::int AS fresh_count,
+          COALESCE(SUM(val) FILTER (WHERE age_days <= 90), 0) AS fresh_value,
+          COUNT(id) FILTER (WHERE age_days BETWEEN 91 AND 180)::int AS watch_count,
+          COALESCE(SUM(val) FILTER (WHERE age_days BETWEEN 91 AND 180), 0) AS watch_value,
+          COUNT(id) FILTER (WHERE age_days BETWEEN 181 AND 365)::int AS critical_count,
+          COALESCE(SUM(val) FILTER (WHERE age_days BETWEEN 181 AND 365), 0) AS critical_value,
+          COUNT(id) FILTER (WHERE age_days > 365)::int AS dead_count,
+          COALESCE(SUM(val) FILTER (WHERE age_days > 365), 0) AS dead_value
+        FROM ready_aged
       `),
 
-            // 3. Stock Card: Repair Stock (+ Potential Revenue & Profit Locked in Repair)
+            // 3. Stock Card: Repair Stock (+ Potential Revenue, Profit & >14d Overdue Count)
             db.query(`
         SELECT 
-          COUNT(id) as total_count, 
+          COUNT(id)::int as total_count, 
           COALESCE(SUM(purchase_price), 0) as total_value,
           COALESCE(SUM(COALESCE(est_sell_price, purchase_price)), 0) as potential_sell_value,
-          COALESCE(SUM(GREATEST(0, COALESCE(est_sell_price, purchase_price) - COALESCE(purchase_price, 0))), 0) as potential_profit
+          COALESCE(SUM(GREATEST(0, COALESCE(est_sell_price, purchase_price) - COALESCE(purchase_price, 0))), 0) as potential_profit,
+          COUNT(id) FILTER (WHERE (CURRENT_DATE - COALESCE(purchase_date, updated_at::date)) > 14)::int as overdue_repair_count
         FROM drones WHERE status = 'Repair'
       `),
 
@@ -147,44 +166,23 @@ const getDashboardData = async (req, res) => {
         LIMIT 5
       `),
 
-            // 8. Analytics: Slow Moving Stock (Aging Inventory + Smart Markdown Suggestion)
+            // 8. Analytics: Physical Unit Aging (> 90 days: Watch 91-180d, Critical 181-365d, Dead >365d)
             db.query(`
-        WITH stock_data AS (
-          SELECT 
-            dm.id as model_id,
-            dm.model_name,
-            COUNT(d.id)::int as current_stock,
-            MIN(d.id)::int as sample_drone_id,
-            COALESCE(AVG(d.purchase_price), 0)::float as avg_purchase_price,
-            COALESCE(AVG(COALESCE(d.est_sell_price, dm.default_est_sell_price, d.purchase_price * 1.15)), 0)::float as avg_est_sell_price
-          FROM drone_models dm
-          LEFT JOIN drones d ON dm.id = d.model_id AND d.status = 'Ready'
-          GROUP BY dm.id, dm.model_name
-        ),
-        last_sale AS (
-          SELECT 
-            dm.id as model_id,
-            MAX(t.date) as last_sale_date
-          FROM transaction_items ti
-          JOIN transactions t ON ti.transaction_id = t.id
-          JOIN drones d ON ti.item_id = d.id
-          JOIN drone_models dm ON d.model_id = dm.id
-          WHERE ti.item_type = 'Drone' AND t.type = 'SALE' AND t.status IN ('SUCCESS', 'PROCESS')
-          GROUP BY dm.id
-        )
         SELECT 
-          sd.model_name,
-          sd.current_stock,
-          sd.sample_drone_id,
-          sd.avg_purchase_price,
-          sd.avg_est_sell_price,
-          EXTRACT(DAY FROM AGE(CURRENT_DATE, ls.last_sale_date))::int as days_since_last_sale
-        FROM stock_data sd
-        JOIN last_sale ls ON sd.model_id = ls.model_id
-        WHERE sd.current_stock > 0 
-          AND ls.last_sale_date < CURRENT_DATE - INTERVAL '30 days'
-        ORDER BY days_since_last_sale DESC
-        LIMIT 5
+          d.id::int AS sample_drone_id,
+          dm.model_name,
+          COALESCE(dsm.name, '') AS sub_model_name,
+          GREATEST(0, (CURRENT_DATE - COALESCE(d.purchase_date, d.created_at::date)))::int AS aging_days,
+          COALESCE(d.purchase_price, 0)::float AS purchase_price,
+          COALESCE(d.est_sell_price, dsm.default_sell_price, dm.default_est_sell_price, d.purchase_price * 1.15)::float AS est_sell_price,
+          COALESCE(d.notes, '') AS notes
+        FROM drones d
+        JOIN drone_models dm ON d.model_id = dm.id
+        LEFT JOIN drone_sub_models dsm ON d.sub_model_id = dsm.id
+        WHERE d.status = 'Ready'
+          AND (CURRENT_DATE - COALESCE(d.purchase_date, d.created_at::date)) > 90
+        ORDER BY aging_days DESC, purchase_price DESC
+        LIMIT 25
       `),
 
             // 9. Alert: Stok Ready Terlama (1 Item + Markdown Hint)
@@ -192,30 +190,49 @@ const getDashboardData = async (req, res) => {
         SELECT 
           d.id, 
           dm.model_name, 
-          EXTRACT(DAY FROM AGE(CURRENT_DATE, COALESCE(d.purchase_date::timestamp, d.updated_at)))::int as days,
+          GREATEST(0, (CURRENT_DATE - COALESCE(d.purchase_date, d.created_at::date)))::int as days,
           COALESCE(d.purchase_price, 0)::float as purchase_price,
           COALESCE(d.est_sell_price, dm.default_est_sell_price, 0)::float as est_sell_price
         FROM drones d
         JOIN drone_models dm ON d.model_id = dm.id
         WHERE d.status = 'Ready'
-        ORDER BY COALESCE(d.purchase_date::timestamp, d.updated_at) ASC
+        ORDER BY COALESCE(d.purchase_date, d.created_at::date) ASC
         LIMIT 1
       `),
 
-            // 10. Alert: Stok Repair Prioritas (Terlama & Potensi Profit Tertinggi, max 2 item)
+            // 10. Repair Bottleneck & Capital Frozen Queue (Prioritized by Cash-Unlock ROI & Model DIO Velocity)
             db.query(`
+        WITH model_dio AS (
+          SELECT
+            d2.model_id,
+            AVG(GREATEST(1, (t.date::date - COALESCE(d2.purchase_date, d2.created_at::date))))::float AS avg_dio_days,
+            COUNT(ti.id)::int AS sold_count
+          FROM transaction_items ti
+          JOIN transactions t ON ti.transaction_id = t.id
+          JOIN drones d2 ON ti.item_id = d2.id AND ti.item_type = 'Drone'
+          WHERE t.type = 'SALE' AND t.status IN ('SUCCESS', 'PROCESS')
+          GROUP BY d2.model_id
+        )
         SELECT 
-          d.id, 
-          dm.model_name, 
-          EXTRACT(DAY FROM AGE(CURRENT_DATE, COALESCE(d.purchase_date::timestamp, d.updated_at)))::int as days,
-          COALESCE(d.purchase_price, 0)::float as purchase_price,
-          COALESCE(d.est_sell_price, dm.default_est_sell_price, 0)::float as est_sell_price
+          d.id::int AS id,
+          dm.model_name,
+          COALESCE(dsm.name, '') AS sub_model_name,
+          GREATEST(0, (CURRENT_DATE - COALESCE(d.purchase_date, d.updated_at::date)))::int AS days,
+          COALESCE(d.purchase_price, 0)::float AS purchase_price,
+          COALESCE(d.est_sell_price, dsm.default_sell_price, dm.default_est_sell_price, d.purchase_price)::float AS est_sell_price,
+          md.avg_dio_days,
+          COALESCE(md.sold_count, 0)::int AS model_sold_count,
+          COALESCE(d.notes, '') AS notes
         FROM drones d
         JOIN drone_models dm ON d.model_id = dm.id
+        LEFT JOIN drone_sub_models dsm ON d.sub_model_id = dsm.id
+        LEFT JOIN model_dio md ON md.model_id = d.model_id
         WHERE d.status = 'Repair'
-        ORDER BY EXTRACT(DAY FROM AGE(CURRENT_DATE, COALESCE(d.purchase_date::timestamp, d.updated_at))) DESC,
-                 GREATEST(0, COALESCE(d.est_sell_price, dm.default_est_sell_price, 0) - COALESCE(d.purchase_price, 0)) DESC
-        LIMIT 2
+        ORDER BY
+          (GREATEST(100000, COALESCE(d.est_sell_price, dsm.default_sell_price, dm.default_est_sell_price, d.purchase_price) - COALESCE(d.purchase_price, 0))
+            / GREATEST(5.0, COALESCE(md.avg_dio_days, 21.0))) DESC,
+          days DESC
+        LIMIT 6
       `),
 
             // 11. Business Wallet (Liquid Cash Available vs Pending Escrow PROCESS)
@@ -389,23 +406,60 @@ const getDashboardData = async (req, res) => {
             };
         });
 
-        // 4. Slow Moving processing (+ Smart Markdown Recommendation)
+        // 4. Physical Unit Aging (4-Tier: Watch 91-180d, Critical 181-365d, Dead >365d)
         const slowMovingData = slowMovingResult.rows.map(row => {
-            const avgBuy = parseNum(row.avg_purchase_price);
-            const avgSell = parseNum(row.avg_est_sell_price);
-            const estMargin = Math.max(0, avgSell - avgBuy);
-            const recommendedDiscount = estMargin > 200000
-                ? Math.round((estMargin * 0.35) / 50000) * 50000
-                : 0;
-            const estProfitAfterDiscount = Math.max(0, estMargin - recommendedDiscount);
+            const agingDays = parseNum(row.aging_days);
+            const buyPrice = parseNum(row.purchase_price);
+            const sellPrice = parseNum(row.est_sell_price);
+            const estMargin = Math.max(0, sellPrice - buyPrice);
+
+            let agingTier = 'WATCH';
+            let statusBadge = '3-6 Bln';
+            let recommendedDiscount = 0;
+            let estProfitAfterDiscount = estMargin;
+            let actionHint = '';
+
+            if (agingDays > 365) {
+                agingTier = 'DEAD';
+                statusBadge = '>1 Thn (Mati)';
+                const targetClearPrice = buyPrice > 0 ? Math.round((buyPrice * 0.9) / 50000) * 50000 : sellPrice;
+                recommendedDiscount = Math.max(0, sellPrice - targetClearPrice);
+                estProfitAfterDiscount = Math.max(0, targetClearPrice - buyPrice);
+                actionHint = 'Stok mati >1 thn: likuidasi harga pasar atau pecah jual ketengan (body/baterai/remote)';
+            } else if (agingDays > 180) {
+                agingTier = 'CRITICAL';
+                statusBadge = '6-12 Bln';
+                recommendedDiscount = estMargin > 100000
+                    ? Math.round((estMargin * 0.75) / 50000) * 50000
+                    : 0;
+                estProfitAfterDiscount = Math.max(0, estMargin - recommendedDiscount);
+                actionHint = recommendedDiscount > 0
+                    ? `Jual cepat dekat HPP: turun ${formatIdrCompact(recommendedDiscount)} agar modal aman`
+                    : 'Jual cepat mendekati HPP (BEP) agar modal tidak makin terdepresiasi';
+            } else {
+                agingTier = 'WATCH';
+                statusBadge = '3-6 Bln';
+                recommendedDiscount = estMargin > 200000
+                    ? Math.round((estMargin * 0.30) / 50000) * 50000
+                    : 0;
+                estProfitAfterDiscount = Math.max(0, estMargin - recommendedDiscount);
+                actionHint = recommendedDiscount > 0
+                    ? `Saran diskon tipis ${formatIdrCompact(recommendedDiscount)} (sisa cuan ${formatIdrCompact(estProfitAfterDiscount)})`
+                    : 'Refresh iklan marketplace atau buat paket bundling aksesoris';
+            }
+
             return {
-                model_name: row.model_name,
-                current_stock: parseNum(row.current_stock),
-                days_since_last_sale: parseNum(row.days_since_last_sale),
-                status_badge: "Warning",
+                model_name: row.sub_model_name ? `${row.model_name} (${row.sub_model_name})` : row.model_name,
+                current_stock: 1,
+                days_since_last_sale: agingDays,
+                aging_tier: agingTier,
+                status_badge: statusBadge,
                 sample_drone_id: row.sample_drone_id ? parseNum(row.sample_drone_id) : null,
+                purchase_price: buyPrice,
+                est_sell_price: sellPrice,
                 recommended_discount: recommendedDiscount,
-                est_profit_after_discount: estProfitAfterDiscount
+                est_profit_after_discount: estProfitAfterDiscount,
+                action_hint: actionHint
             };
         });
 
@@ -431,7 +485,7 @@ const getDashboardData = async (req, res) => {
                     : 'Evaluasi harga jual atau buat paket bundling'
             });
         }
-        for (const r of alertsRepairResult.rows) {
+        for (const r of alertsRepairResult.rows.slice(0, 2)) {
             const buyPrice = parseNum(r.purchase_price);
             const sellPrice = parseNum(r.est_sell_price);
             const potentialProfit = Math.max(0, sellPrice - buyPrice);
@@ -448,6 +502,36 @@ const getDashboardData = async (req, res) => {
                     : 'Segera cek status perbaikan agar modal tidak tertahan'
             });
         }
+
+        const repairBottlenecks = alertsRepairResult.rows.map((row, idx) => {
+            const buyPrice = parseNum(row.purchase_price);
+            const sellPrice = parseNum(row.est_sell_price);
+            const potentialProfit = Math.max(0, sellPrice - buyPrice);
+            const dio = row.avg_dio_days ? Number(parseNum(row.avg_dio_days).toFixed(1)) : null;
+            const repairDays = parseNum(row.days);
+
+            let priorityReason = '';
+            if (dio !== null && potentialProfit > 0) {
+                priorityReason = `⚡ Laku rata-rata ${dio} hr · Est. Cuan +${formatIdrCompact(potentialProfit)}`;
+            } else if (potentialProfit > 0) {
+                priorityReason = `💰 Potensi cuan +${formatIdrCompact(potentialProfit)} setelah selesai servis`;
+            } else {
+                priorityReason = `⏱️ Tertahan ${repairDays} hari — segera cairkan modal`;
+            }
+
+            return {
+                drone_id: parseNum(row.id),
+                name: row.sub_model_name ? `${row.model_name} (${row.sub_model_name})` : row.model_name,
+                repair_days: repairDays,
+                purchase_price: buyPrice,
+                est_sell_price: sellPrice,
+                potential_profit: potentialProfit,
+                avg_days_to_sell: dio,
+                notes: row.notes || '',
+                priority_rank: idx + 1,
+                priority_reason: priorityReason
+            };
+        });
 
         const marketInsights = marketInsightsResult.rows.map(row => ({
             id: row.id,
@@ -466,6 +550,7 @@ const getDashboardData = async (req, res) => {
         }));
 
         const businessWalletData = businessWalletResult.rows[0] || {};
+        const readyRow = stockReadyResult.rows[0] || {};
         const repairRow = stockRepairResult.rows[0] || {};
 
         const responseData = {
@@ -481,17 +566,28 @@ const getDashboardData = async (req, res) => {
             stock_cards: [
                 {
                     title: "Ready Stock",
-                    total_monetary_value: parseNum(stockReadyResult.rows[0].total_value),
-                    total_count: parseNum(stockReadyResult.rows[0].total_count),
+                    total_monetary_value: parseNum(readyRow.total_value),
+                    total_count: parseNum(readyRow.total_count),
                     potential_sell_value: 0,
-                    potential_profit: 0
+                    potential_profit: 0,
+                    aging_breakdown: {
+                        fresh_count: parseNum(readyRow.fresh_count),
+                        fresh_value: parseNum(readyRow.fresh_value),
+                        watch_count: parseNum(readyRow.watch_count),
+                        watch_value: parseNum(readyRow.watch_value),
+                        critical_count: parseNum(readyRow.critical_count),
+                        critical_value: parseNum(readyRow.critical_value),
+                        dead_count: parseNum(readyRow.dead_count),
+                        dead_value: parseNum(readyRow.dead_value)
+                    }
                 },
                 {
                     title: "Repair Stock",
                     total_monetary_value: parseNum(repairRow.total_value),
                     total_count: parseNum(repairRow.total_count),
                     potential_sell_value: parseNum(repairRow.potential_sell_value),
-                    potential_profit: parseNum(repairRow.potential_profit)
+                    potential_profit: parseNum(repairRow.potential_profit),
+                    overdue_repair_count: parseNum(repairRow.overdue_repair_count)
                 },
                 {
                     title: "Accessory Value",
@@ -533,12 +629,13 @@ const getDashboardData = async (req, res) => {
                 {
                     card_id: "slow_moving",
                     card_type: "list_aging",
-                    title: "Slow Moving Stock",
-                    description: "Perlu evaluasi harga atau promo",
+                    title: "Kesehatan Umur Stok & Likuidasi",
+                    description: "Unit Ready mengendap > 3 bulan (Pantau, Kritis, & Stok Mati)",
                     data: slowMovingData
                 }
             ],
             alerts: alerts,
+            repair_bottlenecks: repairBottlenecks,
             market_insights: marketInsights
         };
 
